@@ -75,8 +75,8 @@ int main() {
     // The same 48-step behavior should work for wave RELEASE.
     early.held=true;
     std::vector<Collider> releaseGate{
-        makeBox({49.85f,45.5f,50.15f,100.f}),
-        makeBox({49.85f,-100.f,50.15f,47.5f})
+        makeBox({49.85f,47.5f,50.15f,100.f}),
+        makeBox({49.85f,-100.f,50.15f,45.5f})
     };
     auto heldRelease=chooseDelay(early,false,48,76,releaseGate);
     assert(heldRelease.delayFrames==48);
