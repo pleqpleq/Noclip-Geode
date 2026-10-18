@@ -5,9 +5,9 @@
   },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.4.2",
+  "version": "v0.5.0",
   "developer": "Supleq",
-  "description": "Experimental wave timing assistant with diagnostic logging for skipped input, scene scan, and buffered dispatch.",
+  "description": "Experimental invisible wave early-input buffering, adjustable up to 300ms. Press and release correction requires a predicted safe path.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -16,7 +16,7 @@
     },
     "window-frames": {
       "name": "Timing window (frames)",
-      "description": "Maximum allowed early input offset, in game simulation steps. Default: 5. Set 0 to disable delay.",
+      "description": "Only for old learned reference timings (cube/other modes). Wave instead uses Wave early input buffer (milliseconds). Default 5 physics frames.",
       "type": "int",
       "default": 5,
       "min": 0,
@@ -67,9 +67,10 @@
     "wave-horizon": {
       "name": "Wave lookahead (frames)",
       "type": "int",
-      "default": 20,
+      "default": 76,
       "min": 12,
-      "max": 60
+      "max": 140,
+      "description": "How far ahead to search for wave collisions in physics steps; the mod automatically raises this above the early buffer."
     },
     "log-wave-decisions": {
       "name": "Log wave decisions (debug)",
@@ -82,6 +83,20 @@
       "type": "bool",
       "default": true,
       "description": "Send buffered wave presses/releases to PlayerObject directly instead of GJBaseGameLayer. This avoids CBF swallowing delayed inputs; disable if it conflicts with another input mod."
+    },
+    "wave-early-buffer-ms": {
+      "name": "Wave early input buffer (milliseconds)",
+      "description": "Maximum time an early wave PRESS or RELEASE may be held while searching for a predicted safe frame. Default 200ms ~= 48 physics steps at 240 TPS. Independent of the 5-frame reference setting.",
+      "type": "int",
+      "default": 200,
+      "min": 0,
+      "max": 300,
+      "control": {
+        "slider": true,
+        "slider-step": 10,
+        "arrows": true,
+        "arrow-step": 10
+      }
     }
   }
 }

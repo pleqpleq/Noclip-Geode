@@ -58,5 +58,28 @@ int main() {
     auto circle=makeCircle({2.f,2.f},.5f);
     assert(!sweptHit({0.f,0.f},{1.f,1.f},s,circle));
     assert(sweptHit({1.5f,2.f},{2.5f,2.f},s,circle));
-    std::cout << "Noclip v0.4 geometry and frame timing tests passed\n";
+    // The concrete 0.2-second early-input case: at 240 TPS, 0.2s
+    // means 48 steps, NOT 5. Only switching direction at step 48
+    // navigates this single narrow gate at x~=50.
+    State early{.x=0.f,.y=0.f,.dxPerFrame=1.f,.halfWidth=.1f,
+                .halfHeight=.1f,.held=false};
+    std::vector<Collider> lateGate{
+        makeBox({49.85f,-45.5f,50.15f,100.f}),
+        makeBox({49.85f,-100.f,50.15f,-47.5f})
+    };
+    auto fortyEight=chooseDelay(early,true,48,76,lateGate);
+    assert(fortyEight.evaluated && fortyEight.verdict==Verdict::Buffered);
+    assert(fortyEight.delayFrames==48);
+    auto five=chooseDelay(early,true,5,76,lateGate);
+    assert(five.delayFrames==0);
+    // The same 48-step behavior should work for wave RELEASE.
+    early.held=true;
+    std::vector<Collider> releaseGate{
+        makeBox({49.85f,45.5f,50.15f,100.f}),
+        makeBox({49.85f,-100.f,50.15f,47.5f})
+    };
+    auto heldRelease=chooseDelay(early,false,48,76,releaseGate);
+    assert(heldRelease.delayFrames==48);
+
+    std::cout << "Noclip v0.5 geometry and 200ms frame timing tests passed\n";
 }

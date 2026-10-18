@@ -1,42 +1,32 @@
-# Noclip v0.4.2 — diagnostics build (NOT validated in-game)
+# Noclip v0.5.0 — experimental 200ms early-wave buffer
 
-This experimental Geode mod attempts to snap an early wave press or release
-forward by up to 5 simulation frames using a limited prediction of static
-collision geometry. Compilation and portable geometry tests do not prove it
-works on Geometry Dash levels. **No guarantee of perfect inputs.**
+**This revision fixes a timing-window mismatch, not proven frame-perfect
+collision prediction.** At GD's nominal 240 physics steps/sec, a press 0.2
+seconds early arrives 48 steps before the desired turn. Older Noclip builds
+allowed only 5 steps (~21ms) and examined only 20 steps ahead.
 
-## Why v0.4.2
+## Settings
+- **Wave early input buffer (milliseconds)**: 200 ms by default, adjustable
+  0–300 ms. This is separate from the legacy 5-physics-frame setting for
+  cube/learned references.
+- Hidden wave trajectory correction: enabled
+- Wave lookahead: 76 steps default, automatically increased when needed
+- Log wave decisions: optional diagnostics
 
-Multiple successful builds were reported, but live gameplay still failed.
-The preceding builds log only after their initial eligibility checks; if
-your click is skipped before those checks, the log contains no explanation.
-v0.4.2 adds logging **before every pass-through gate**.
+## Expected wave behavior
+On a wave press/release the mod predicts local collision paths for now and
+delays up to the configured wave buffer. It buffers **only if** the immediate
+trajectory predicts a collision and delaying the input predicts survival
+through the next obstacle. A click far from a relevant hazard, or a section
+the approximation cannot predict, **passes through normally**. It does not
+blindly delay every early click.
 
-## Diagnose it in one test
+The model uses approximate current wave speed and static collision geometry.
+It does not include GD's full state/physics and cannot promise frame-perfect
+survival in the user's specific level.
 
-1. Install a Windows Geode artifact from the latest successful build in
-   https://github.com/pleqpleq/Noclip-Geode/actions
-   (this project currently targets GD 2.2081).
-2. In Geode > Noclip Settings, turn on **Log wave decisions (debug)**.
-3. Restart the level and reproduce *one* failed wave input.
-4. Go to your Geometry Dash installation directory > `geode/logs`.
-5. Send the latest log file or copy lines containing `Noclip`.
-
-Interpretation:
-- `Noclip v0.4.2 loaded` but no `Noclip INPUT` lines:
-  the mod's game-layer hook never received your jump event.
-- `play=false editor=true`: the mod bypasses editor playtesting.
-- `eligible=false` or `wave=false`: the assistance was gated off.
-- `scan hazards=0`: it didn't find nearby collision objects.
-- `unavailable`, `already-safe`, `no-safe-frame`: it chose no delay.
-- `buffered` and `DISPATCHED`: input was queued and sent.
-- `heldNow` does not match `expectedHeld`: an input hook may have
-  prevented the event from reaching the player.
-
-TESTMODE text **alone** is not proof of editor playtesting: start positions
-also display TESTMODE in normal level play.
-
-Features remain experimental. The predictor still does not simulate the real
-GD collision engine or moving triggers, and can't reliably correct arbitrary
-frame-perfect gaps. The purpose of this build is evidence-based debugging,
-not another unsupported accuracy claim.
+## Install and diagnose
+https://github.com/pleqpleq/Noclip-Geode/actions — use latest successful
+Windows Geode artifact. Targets GD 2.2081.
+If a predicted early input still registers normally, enable Log wave
+decisions and share Geode log lines starting with `Noclip`.

@@ -38,10 +38,21 @@ struct Config {
     int waveHorizon;
     bool logWave;
     bool directWaveDispatch;
+    int waveEarlyBufferMs;
+    int waveEarlyBufferSteps;
 };
 
 Config config() {
     auto* mod = Mod::get();
+    int waveMs = std::clamp(
+        static_cast<int>(mod->getSettingValue<int64_t>("wave-early-buffer-ms")),
+        0, 300
+    );
+    // Current Windows GD 2.2081 uses a nominal 240 physics steps per second.
+    // This is deliberately separate from the older learned-timing window.
+    int waveTicks = std::clamp(
+        static_cast<int>(std::ceil(waveMs * 240.0 / 1000.0)), 0, 72
+    );
     return {
         mod->getSettingValue<bool>("enabled"),
         std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("window-frames")), 0, 20),
@@ -51,9 +62,11 @@ Config config() {
         mod->getSettingValue<bool>("platformer"),
         mod->getSettingValue<bool>("clear-learned"),
         mod->getSettingValue<bool>("predict-wave"),
-        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 60),
+        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 140),
         mod->getSettingValue<bool>("log-wave-decisions"),
-        mod->getSettingValue<bool>("wave-direct-dispatch")
+        mod->getSettingValue<bool>("wave-direct-dispatch"),
+        waveMs,
+        waveTicks
     };
 }
 
@@ -385,7 +398,13 @@ std::optional<noclip::wave::Decision> wavePredictedDelay(
     state.gravityReversed = player->m_isUpsideDown;
     state.halfWidth = rect.size.width * .5f;
     state.halfHeight = rect.size.height * .5f;
-    auto scene = waveObstacles(layer, state, cfg.waveHorizon);
+    // Look ahead far enough to actually discover a turning point even
+    // when the physical click is ~0.2 seconds (48 ticks) early.
+    int horizon = std::clamp(
+        std::max(cfg.waveHorizon, cfg.waveEarlyBufferSteps + 24),
+        12, 150
+    );
+    auto scene = waveObstacles(layer, state, horizon);
     if (!scene) {
         if (cfg.logWave)
             log::info("Noclip WAVE: obstacle scan unavailable");
@@ -400,7 +419,7 @@ std::optional<noclip::wave::Decision> wavePredictedDelay(
         );
 
     return noclip::wave::chooseDelay(
-        state, down, cfg.window, cfg.waveHorizon,
+        state, down, cfg.waveEarlyBufferSteps, horizon,
         scene->hazards, scene->special
     );
 }
@@ -430,15 +449,17 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             bool eligible = inPlay(layer, cfg);
             bool isWave = layer && layer->m_player1 && layer->m_player1->m_isDart;
             log::info(
-                "Noclip INPUT {}: enabled={} window={} play={} editor={} "
+                "Noclip INPUT {}: enabled={} referenceWindow={} waveWindow={}ms/{}ticks play={} editor={} "
                 "layerMatch={} eligible={} wave={} step={}",
                 down ? "PRESS" : "RELEASE", cfg.enabled, cfg.window,
+                cfg.waveEarlyBufferMs, cfg.waveEarlyBufferSteps,
                 layer != nullptr, editor != nullptr, layer == base,
                 eligible, isWave,
                 layer ? layer->m_currentStep : -1
             );
         }
-        if (g_dispatchingBuffered || !cfg.enabled || cfg.window == 0
+        if (g_dispatchingBuffered || !cfg.enabled
+            || (cfg.window == 0 && cfg.waveEarlyBufferSteps == 0)
             || !inPlay(layer, cfg) || layer != static_cast<GJBaseGameLayer*>(this)
             || button != static_cast<int>(PlayerButton::Jump)) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
@@ -562,10 +583,13 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             int step = layer->m_currentStep;
             if (step != g_session.lastStep) {
                 updateVelocity(layer, step);
-                if (!cfg.enabled || cfg.window == 0 || cfg.recordReference) {
+                if (!cfg.enabled
+                    || (cfg.window == 0 && cfg.waveEarlyBufferSteps == 0)
+                    || cfg.recordReference) {
                     for (auto& q : g_session.delayed) q.clear();
                 }
-                if (inPlay(layer, cfg) && cfg.enabled && cfg.window > 0
+                if (inPlay(layer, cfg) && cfg.enabled
+                    && (cfg.window > 0 || cfg.waveEarlyBufferSteps > 0)
                     && !cfg.recordReference) {
                     for (int i = 0; i != 2; ++i) {
                         auto& queue = g_session.delayed[i];
@@ -648,5 +672,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.4.2 loaded: debug input pipeline diagnostics");
+    log::info("Noclip v0.5.0 loaded: wave early buffer 200ms default (48 steps at 240TPS)");
 }

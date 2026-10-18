@@ -202,8 +202,8 @@ inline Decision chooseDelay(
     if(!std::isfinite(initial.x)||!std::isfinite(initial.y)||
        !std::isfinite(initial.dxPerFrame)||std::abs(initial.dxPerFrame)<.1f||
        initial.halfWidth<=0.f||initial.halfHeight<=0.f||
-       maxDelay<0||maxDelay>20||horizonFrames<maxDelay+2||
-       horizonFrames>120||obstacles.size()>1024||specials.size()>1024||
+       maxDelay<0||maxDelay>72||horizonFrames<maxDelay+2||
+       horizonFrames>150||obstacles.size()>1024||specials.size()>1024||
        nextHeld==initial.held) return out;
     for(auto const& c:obstacles)if(!valid(c))return out;
     for(auto const& c:specials)if(!valid(c))return out;
