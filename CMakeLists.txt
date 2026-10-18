@@ -5,13 +5,11 @@ if(NOT DEFINED ENV{GEODE_SDK})
   message(FATAL_ERROR "GEODE_SDK missing")
 endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode-sdk)
-# With current 2.2081 bindings the generated unity sources only forward-declare
-# two state types. Force their complete generated definitions into that
-# target's compilation units (GeodeBindings only, not the mod or SDK).
+# Work around missing transitive header imports in GD 2.2081's generated
+# unity source units without pretending the upstream state types are other types.
 if(TARGET GeodeBindings AND WIN32)
     target_compile_options(GeodeBindings PRIVATE
-        -include Geode/binding/SequenceTriggerState.hpp
-        -include Geode/binding/EffectManagerState.hpp
+        -include Geode/Geode.hpp
     )
 endif()
 
