@@ -21,6 +21,8 @@ jobs:
         with:
           target: Win64
           build-config: Release
+          # Earlier bindings before the upstream header-trimming change.
+          bindings-ref: e9fb9bb4500f831061fd8bf6cf9b46b9fcd4c682
       - uses: actions/upload-artifact@v4
         with:
           name: Noclip-Windows-Geode
