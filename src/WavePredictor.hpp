@@ -1,11 +1,11 @@
 #pragma once
 
-// Small, dependency-free, read-only trajectory scorer. It never modifies
-// Geometry Dash state. This model is intentionally limited to classic wave
-// motion through currently static rectangular hazard hitboxes.
+// Noclip wave micro-predictor. No overlay, no mutation of GD state.
+// This is an approximate static-AABB predictor, NOT GD's real collision engine.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace noclip::wave {
@@ -27,10 +27,33 @@ struct State {
     bool gravityReversed = false;
 };
 
+enum class Verdict {
+    Unsupported,  // Can't safely predict this scenario
+    AlreadySafe,  // Pressing/releasing NOW is predicted safe
+    TooEarly,     // Earliest predicted collision is far outside timing window
+    NoCorrection, // No delay in the window avoids the immediate obstacle
+    Buffered      // delayFrames gives the predicted safest frame
+};
+
+inline char const* verdictName(Verdict v) {
+    switch (v) {
+        case Verdict::Unsupported: return "unsupported";
+        case Verdict::AlreadySafe: return "already-safe";
+        case Verdict::TooEarly: return "collision-too-far";
+        case Verdict::NoCorrection: return "no-safe-frame";
+        case Verdict::Buffered: return "buffered";
+    }
+    return "unknown";
+}
+
 struct Decision {
     bool evaluated = false;
     bool immediatePathHits = false;
-    int delayFrames = 0; // 0 means forward now; never exceed maxDelay.
+    int delayFrames = 0;
+    int firstCollisionFrame = -1;
+    int comparedFrames = 0;
+    int safeCandidates = 0;
+    Verdict verdict = Verdict::Unsupported;
 };
 
 inline bool valid(Rect r) {
@@ -39,86 +62,168 @@ inline bool valid(Rect r) {
         && r.left < r.right && r.bottom < r.top;
 }
 
-inline bool overlaps(Rect a, Rect b) {
-    return a.left < b.right && b.left < a.right
-        && a.bottom < b.top && b.bottom < a.top;
-}
-
-// Continuous segment against expanded AABB. Expanding the obstacle by the
-// wave hitbox dimensions catches in-between-frame collisions without swept
-// AABB corner false positives on diagonal wave motion.
+// Swept point against rectangle expanded by player half-size.
+// Conservative for rotated spikes, but checks in-between physics frames.
 inline bool sweptHit(
-    float x0, float y0, float x1, float y1, State const& s, Rect hazard
+    float x0, float y0, float x1, float y1, State const& s, Rect obstacle
 ) {
-    float loX = hazard.left - s.halfWidth;
-    float hiX = hazard.right + s.halfWidth;
-    float loY = hazard.bottom - s.halfHeight;
-    float hiY = hazard.top + s.halfHeight;
+    float xLo = obstacle.left - s.halfWidth;
+    float xHi = obstacle.right + s.halfWidth;
+    float yLo = obstacle.bottom - s.halfHeight;
+    float yHi = obstacle.top + s.halfHeight;
     float tMin = 0.f;
     float tMax = 1.f;
-    auto clipAxis = [&](float start, float delta, float lo, float hi) {
-        if (std::abs(delta) < .000001f) return start >= lo && start <= hi;
-        float a = (lo - start) / delta;
-        float b = (hi - start) / delta;
+    auto clipAxis = [&](float start, float movement, float lo, float hi) {
+        if (std::abs(movement) < 0.000001f) return start >= lo && start <= hi;
+        float a = (lo - start) / movement;
+        float b = (hi - start) / movement;
         if (a > b) std::swap(a, b);
         tMin = std::max(tMin, a);
         tMax = std::min(tMax, b);
         return tMin <= tMax;
     };
-    return clipAxis(x0, x1 - x0, loX, hiX)
-        && clipAxis(y0, y1 - y0, loY, hiY);
+    return clipAxis(x0, x1 - x0, xLo, xHi)
+        && clipAxis(y0, y1 - y0, yLo, yHi);
+}
+
+inline float distanceToRect(float x, float y, State const& state, Rect r) {
+    float dx = std::max({r.left - state.halfWidth - x, 0.f,
+                         x - r.right - state.halfWidth});
+    float dy = std::max({r.bottom - state.halfHeight - y, 0.f,
+                         y - r.top - state.halfHeight});
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+struct Trace {
+    int firstCollision = -1;
+    int hitIndex = -1;
+    float clearance = std::numeric_limits<float>::infinity();
+    bool crossesSpecial = false;
+};
+
+// Test a tap edge arriving in 0..window physics steps.
+// After the edge, assume a held state until the next user input, which is
+// not yet known. Later unrelated obstacles must not decide this click.
+inline Trace trace(
+    State const& initial, bool nextHeld, int inputAfterFrames,
+    int frames, std::vector<Rect> const& obstacles,
+    std::vector<Rect> const& specials = {}
+) {
+    Trace result;
+    float x = initial.x;
+    float y = initial.y;
+    float dyPerFrame = std::abs(initial.dxPerFrame)
+        * (initial.gravityReversed ? -1.f : 1.f);
+    for (int frame = 0; frame < frames; ++frame) {
+        bool held = frame >= inputAfterFrames ? nextHeld : initial.held;
+        float nextX = x + initial.dxPerFrame;
+        float nextY = y + (held ? dyPerFrame : -dyPerFrame);
+        for (auto const& special : specials) {
+            if (sweptHit(x, y, nextX, nextY, initial, special))
+                result.crossesSpecial = true;
+        }
+        for (std::size_t i = 0; i < obstacles.size(); ++i) {
+            auto const& box = obstacles[i];
+            if (sweptHit(x, y, nextX, nextY, initial, box)) {
+                result.firstCollision = frame;
+                result.hitIndex = static_cast<int>(i);
+                return result;
+            }
+            // Three samples approximate smallest clearance, providing a
+            // sensible midpoint for a multi-frame safe interval.
+            result.clearance = std::min(result.clearance,
+                distanceToRect(x, y, initial, box));
+            result.clearance = std::min(result.clearance,
+                distanceToRect((x + nextX) * .5f,
+                               (y + nextY) * .5f, initial, box));
+            result.clearance = std::min(result.clearance,
+                distanceToRect(nextX, nextY, initial, box));
+        }
+        x = nextX;
+        y = nextY;
+    }
+    return result;
 }
 
 inline bool pathHits(
-    State const& initial, bool nextHeld, int inputAfterFrames,
-    int horizonFrames, std::vector<Rect> const& hazards
+    State const& initial, bool nextHeld, int inputAfterFrames, int frames,
+    std::vector<Rect> const& obstacles
 ) {
-    float x = initial.x;
-    float y = initial.y;
-    const float rise = std::abs(initial.dxPerFrame);
-    for (int frame = 0; frame < horizonFrames; ++frame) {
-        bool held = frame >= inputAfterFrames ? nextHeld : initial.held;
-        float xNext = x + initial.dxPerFrame;
-        float yNext = y + (held ? 1.f : -1.f)
-            * (initial.gravityReversed ? -1.f : 1.f) * rise;
-        for (auto const& hazard : hazards) {
-            if (sweptHit(x, y, xNext, yNext, initial, hazard)) return true;
-        }
-        x = xNext;
-        y = yNext;
-    }
-    return false;
+    return trace(initial, nextHeld, inputAfterFrames, frames, obstacles)
+        .firstCollision >= 0;
 }
 
-// Never delay an already-safe trajectory. Only delay if changing the input
-// now predicts collision AND a later input stays clear throughout the horizon.
-// Select the earliest safe delay. If none exists, let the original input pass.
+// Pick a local obstacle window rather than demanding that a wave stays
+// in the same direction through an entire multi-click zigzag.
+// Only attempt corrections when the imminent collision is close enough to
+// the user's frame window; do not rewrite clicks 10+ frames before a hazard.
 inline Decision chooseDelay(
     State const& initial, bool nextHeld, int maxDelay, int horizonFrames,
-    std::vector<Rect> const& hazards
+    std::vector<Rect> const& obstacles,
+    std::vector<Rect> const& specials = {}
 ) {
+    Decision out;
     if (!std::isfinite(initial.x) || !std::isfinite(initial.y)
         || !std::isfinite(initial.dxPerFrame)
         || std::abs(initial.dxPerFrame) < .1f
-        || initial.halfWidth <= 0.f || initial.halfHeight <= 0.f
-        || maxDelay < 0 || horizonFrames < maxDelay + 2
-        || horizonFrames > 120 || maxDelay > 20
-        || hazards.size() > 1024 || nextHeld == initial.held) {
-        return {};
+        || !(initial.halfWidth > 0.f) || !(initial.halfHeight > 0.f)
+        || maxDelay < 0 || maxDelay > 20
+        || horizonFrames < maxDelay + 2 || horizonFrames > 120
+        || obstacles.size() > 1024 || specials.size() > 1024
+        || nextHeld == initial.held) return out;
+
+    for (auto const& r : obstacles) if (!valid(r)) return out;
+    for (auto const& r : specials) if (!valid(r)) return out;
+
+    out.evaluated = true;
+    Trace immediate = trace(initial, nextHeld, 0, horizonFrames, obstacles, specials);
+    if (immediate.crossesSpecial) {
+        out.evaluated = false;
+        return out;
     }
-    for (auto const& rect : hazards) {
-        if (!valid(rect)) return {};
+    if (immediate.firstCollision < 0) {
+        out.verdict = Verdict::AlreadySafe;
+        return out;
+    }
+    out.immediatePathHits = true;
+    out.firstCollisionFrame = immediate.firstCollision;
+    if (immediate.firstCollision > maxDelay + 3) {
+        out.verdict = Verdict::TooEarly;
+        return out;
     }
 
-    Decision out;
-    out.evaluated = true;
-    out.immediatePathHits = pathHits(initial, nextHeld, 0, horizonFrames, hazards);
-    if (!out.immediatePathHits) return out;
+    auto const& first = obstacles[static_cast<std::size_t>(immediate.hitIndex)];
+    // Only require surviving the *current* obstacle. A collision 15 frames
+    // later may simply need the next wave click, not a different timing now.
+    int exitFrame = static_cast<int>(
+        std::ceil((first.right + initial.halfWidth - initial.x)
+                  / initial.dxPerFrame)) + 1;
+    int localEnd = std::max(immediate.firstCollision + 2, exitFrame);
+    localEnd = std::clamp(localEnd, 2, horizonFrames);
+    localEnd = std::min(localEnd, immediate.firstCollision + maxDelay + 3);
+    out.comparedFrames = localEnd;
+
+    // Test ALL candidate delays, not just first safe. Choose the safest
+    // geometric clearance, with earliest delay as a tie-breaker.
+    float bestClearance = -1.f;
+    int bestDelay = 0;
     for (int delay = 1; delay <= maxDelay; ++delay) {
-        if (!pathHits(initial, nextHeld, delay, horizonFrames, hazards)) {
-            out.delayFrames = delay;
-            return out;
+        auto candidate = trace(initial, nextHeld, delay, localEnd,
+                               obstacles, specials);
+        if (candidate.firstCollision >= 0 || candidate.crossesSpecial)
+            continue;
+        ++out.safeCandidates;
+        if (bestDelay == 0
+            || candidate.clearance > bestClearance + .001f) {
+            bestClearance = candidate.clearance;
+            bestDelay = delay;
         }
+    }
+    if (bestDelay) {
+        out.verdict = Verdict::Buffered;
+        out.delayFrames = bestDelay;
+    } else {
+        out.verdict = Verdict::NoCorrection;
     }
     return out;
 }
