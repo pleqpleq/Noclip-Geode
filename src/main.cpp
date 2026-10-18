@@ -345,8 +345,8 @@ std::optional<int> wavePredictedDelay(
     state.dxPerFrame = dxPerStep;
     state.held = currentHeld;
     state.gravityReversed = player->m_isUpsideDown;
-    state.halfWidth = player->m_isMini ? 2.f : 3.5f;
-    state.halfHeight = player->m_isMini ? 2.f : 3.5f;
+    state.halfWidth = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
+    state.halfHeight = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
     auto hazards = waveObstacles(layer, state, cfg.waveHorizon);
     if (!hazards) return std::nullopt;
 
