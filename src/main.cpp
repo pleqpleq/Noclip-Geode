@@ -36,6 +36,7 @@ struct Config {
     bool clearLearned;
     bool predictWave;
     int waveHorizon;
+    bool logWave;
 };
 
 Config config() {
@@ -49,7 +50,8 @@ Config config() {
         mod->getSettingValue<bool>("platformer"),
         mod->getSettingValue<bool>("clear-learned"),
         mod->getSettingValue<bool>("predict-wave"),
-        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 60)
+        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 60),
+        mod->getSettingValue<bool>("log-wave-decisions")
     };
 }
 
@@ -264,7 +266,12 @@ void updateVelocity(PlayLayer* layer, int step) {
 // object type metadata instead of brittle lists of specific object IDs.
 // It intentionally does not simulate portals, orbs, triggers, move actions,
 // rotated polygon edges, or platformer movement. Unknown timing passes through.
-std::optional<std::vector<noclip::wave::Rect>> waveObstacles(
+struct WaveScene {
+    std::vector<noclip::wave::Rect> hazards;
+    std::vector<noclip::wave::Rect> special;
+};
+
+std::optional<WaveScene> waveObstacles(
     PlayLayer* layer, noclip::wave::State const& state, int horizon
 ) {
     if (!layer || !layer->m_objects || state.dxPerFrame <= .1f)
@@ -272,7 +279,7 @@ std::optional<std::vector<noclip::wave::Rect>> waveObstacles(
     auto* children = layer->m_objects;
 
     constexpr std::size_t kMaxCandidates = 1024;
-    std::vector<noclip::wave::Rect> hazards;
+    WaveScene scene;
     const float reach = state.dxPerFrame * horizon + 20.f;
     const float start = state.x - 25.f;
     const float end = state.x + reach;
@@ -324,14 +331,15 @@ std::optional<std::vector<noclip::wave::Rect>> waveObstacles(
         if (box.right < start || box.left > end
             || box.top < state.y - vertical || box.bottom > state.y + vertical)
             continue;
-        if (special) return std::nullopt;
-        hazards.push_back(box);
-        if (hazards.size() > kMaxCandidates) return std::nullopt;
+        if (special) scene.special.push_back(box);
+        else scene.hazards.push_back(box);
+        if (scene.hazards.size() + scene.special.size() > kMaxCandidates)
+            return std::nullopt;
     }
-    return hazards;
+    return scene;
 }
 
-std::optional<int> wavePredictedDelay(
+std::optional<noclip::wave::Decision> wavePredictedDelay(
     PlayLayer* layer, PlayerObject* player, bool currentHeld,
     bool down, float dxPerStep, Config const& cfg
 ) {
@@ -347,14 +355,13 @@ std::optional<int> wavePredictedDelay(
     state.gravityReversed = player->m_isUpsideDown;
     state.halfWidth = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
     state.halfHeight = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
-    auto hazards = waveObstacles(layer, state, cfg.waveHorizon);
-    if (!hazards) return std::nullopt;
+    auto scene = waveObstacles(layer, state, cfg.waveHorizon);
+    if (!scene) return std::nullopt;
 
-    auto choice = noclip::wave::chooseDelay(
-        state, down, cfg.window, cfg.waveHorizon, *hazards
+    return noclip::wave::chooseDelay(
+        state, down, cfg.window, cfg.waveHorizon,
+        scene->hazards, scene->special
     );
-    if (!choice.evaluated) return std::nullopt;
-    return choice.delayFrames;  // 0 => the current click passes through.
 }
 
 bool inPlay(PlayLayer* layer, Config const& cfg) {
@@ -406,22 +413,47 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             return;
         }
 
-        // Wave prediction is first choice; it does not require learning.
-        // A queued press/release must flush before another edge can run.
-        bool preserveQueueOrder = !g_session.delayed[i].empty();
+        // Only wave uses the collision-aware micro predictor. Other modes
+        // continue to use optional learned reference positions.
+        auto& pending = g_session.delayed[i];
+        bool preserveQueueOrder = !pending.empty();
         bool waveMode = cfg.predictWave && mode == 1;
-        auto waveDelay = (waveMode && !preserveQueueOrder)
+        auto prediction = (waveMode && !preserveQueueOrder)
             ? wavePredictedDelay(layer, player, g_session.deliveredHeld[i],
                                  down, g_session.speed[i], cfg)
             : std::nullopt;
-        // While wave prediction is enabled, never fall back to unreliable
-        // recorded anchors or blind delay for unrecognized wave obstacles.
+        int predictedFrames = prediction ? prediction->delayFrames : 0;
+        bool predictiveDelay = predictedFrames > 0;
+
+        if (waveMode && cfg.logWave) {
+            if (preserveQueueOrder) {
+                log::info("Noclip wave {}: queued behind prior edge at step {}",
+                          down ? "PRESS" : "RELEASE", step);
+            } else if (prediction) {
+                log::info(
+                    "Noclip wave {}: {}, delay={} steps, hit={}, checked={}, "
+                    "candidates={}, x={:.1f}, vx={:.2f}",
+                    down ? "PRESS" : "RELEASE",
+                    noclip::wave::verdictName(prediction->verdict),
+                    prediction->delayFrames, prediction->firstCollisionFrame,
+                    prediction->comparedFrames, prediction->safeCandidates,
+                    x, g_session.speed[i]
+                );
+            } else {
+                log::info(
+                    "Noclip wave {}: unavailable (unsupported state/speed), "
+                    "x={:.1f}, vx={:.2f}",
+                    down ? "PRESS" : "RELEASE", x, g_session.speed[i]
+                );
+            }
+        }
+
+        // When wave correction is on, never blindly delay an input.
         auto found = waveMode ? std::optional<float>{} : nearestReference(
             g_session.level, isPlayer1, down, mode,
             x, g_session.speed[i], cfg.window
         );
         bool blind = !waveMode && cfg.blindDelay && !found.has_value();
-        bool predictiveDelay = waveDelay.has_value() && *waveDelay > 0;
         if (!found && !blind && !preserveQueueOrder && !predictiveDelay) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
             g_session.deliveredHeld[i] = down;
@@ -430,24 +462,32 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             return;
         }
 
-        auto& pending = g_session.delayed[i];
         if (pending.size() >= kMaxQueuedPerPlayer) {
-            // Overflow: clear stale deferred edges instead of inverting them.
             pending.clear();
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
             g_session.deliveredHeld[i] = down;
             return;
         }
+
         noclip::Deferred event;
         event.down = down;
         event.button = button;
         event.player1 = isPlayer1;
         event.receivedStep = step;
-        event.expiresStep = step + (predictiveDelay ? *waveDelay
+        event.expiresStep = step + (predictiveDelay ? predictedFrames
             : (found || blind ? cfg.window : 0));
         event.hasTarget = found.has_value();
         event.targetX = found.value_or(0.f);
         event.direction = noclip::normalizeDirection(g_session.speed[i]);
+
+        if (preserveQueueOrder) {
+            // Keep the physical press/release gap intact after buffering:
+            // a 1-step click followed by release remains a 1-step tap.
+            auto const& prev = pending.back();
+            int physicalGap = std::max(1, step - prev.receivedStep);
+            event.expiresStep = std::max(step, prev.expiresStep + physicalGap);
+            event.hasTarget = false;
+        }
         pending.push_back(event);
     }
 
@@ -521,5 +561,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.2.0 loaded: hidden wave trajectory preview enabled");
+    log::info("Noclip v0.3.0 loaded: local wave snap prediction");
 }
