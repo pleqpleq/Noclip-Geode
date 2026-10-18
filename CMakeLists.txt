@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.29)
-project(Noclip VERSION 0.2.0 LANGUAGES CXX)
+project(Noclip VERSION 0.3.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 if(NOT DEFINED ENV{GEODE_SDK})
   message(FATAL_ERROR "GEODE_SDK missing")

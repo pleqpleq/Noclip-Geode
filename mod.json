@@ -5,9 +5,9 @@
   },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.2.0",
+  "version": "v0.3.0",
   "developer": "Supleq",
-  "description": "Experimental hidden wave trajectory prediction for press/release correction.",
+  "description": "Experimental local wave timing correction with hidden trajectory and adjustable buffer.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -62,7 +62,7 @@
       "name": "Hidden wave trajectory correction (experimental)",
       "type": "bool",
       "default": true,
-      "description": "Predict safe wave press/release timings without drawing the trajectory."
+      "description": "Choose a buffered wave press/release on the safest predicted frame near the next obstacle; invisible."
     },
     "wave-horizon": {
       "name": "Wave lookahead (frames)",
@@ -70,6 +70,12 @@
       "default": 20,
       "min": 12,
       "max": 60
+    },
+    "log-wave-decisions": {
+      "name": "Log wave decisions (debug)",
+      "type": "bool",
+      "default": false,
+      "description": "Log whether each wave press/release was buffered, and why not. No overlay is shown."
     }
   }
 }
