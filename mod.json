@@ -5,9 +5,9 @@
   },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.3.0",
+  "version": "v0.4.0",
   "developer": "Supleq",
-  "description": "Experimental local wave timing correction with hidden trajectory and adjustable buffer.",
+  "description": "Experimental shape-aware buffered wave inputs using live hitboxes, triangular slope geometry and detailed debug logs.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -62,7 +62,7 @@
       "name": "Hidden wave trajectory correction (experimental)",
       "type": "bool",
       "default": true,
-      "description": "Choose a buffered wave press/release on the safest predicted frame near the next obstacle; invisible."
+      "description": "Shape-aware hidden wave press/release timing assist (still experimental; not guaranteed perfect)."
     },
     "wave-horizon": {
       "name": "Wave lookahead (frames)",
@@ -75,7 +75,7 @@
       "name": "Log wave decisions (debug)",
       "type": "bool",
       "default": false,
-      "description": "Log whether each wave press/release was buffered, and why not. No overlay is shown."
+      "description": "Log each wave input decision and the exact frame the buffered input is delivered."
     }
   }
 }

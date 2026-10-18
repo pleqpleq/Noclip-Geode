@@ -267,8 +267,8 @@ void updateVelocity(PlayLayer* layer, int step) {
 // It intentionally does not simulate portals, orbs, triggers, move actions,
 // rotated polygon edges, or platformer movement. Unknown timing passes through.
 struct WaveScene {
-    std::vector<noclip::wave::Rect> hazards;
-    std::vector<noclip::wave::Rect> special;
+    std::vector<noclip::wave::Collider> hazards;
+    std::vector<noclip::wave::Collider> special;
 };
 
 std::optional<WaveScene> waveObstacles(
@@ -331,8 +331,31 @@ std::optional<WaveScene> waveObstacles(
         if (box.right < start || box.left > end
             || box.top < state.y - vertical || box.bottom > state.y + vertical)
             continue;
-        if (special) scene.special.push_back(box);
-        else scene.hazards.push_back(box);
+        noclip::wave::Collider collider = noclip::wave::makeBox(box);
+        if (type == GameObjectType::Slope) {
+            // Sloped surfaces have triangular collision geometry.
+            collider = noclip::wave::makeTriangle(box, object->m_slopeDirection);
+        } else if (object->m_objectRadius > 0.f) {
+            float radius = object->m_objectRadius * std::max(
+                std::abs(object->m_scaleX), std::abs(object->m_scaleY));
+            if (radius > 0.f)
+                collider = noclip::wave::makeCircle(
+                    {static_cast<float>(object->m_positionX),
+                     static_cast<float>(object->m_positionY)}, radius);
+        } else if (object->m_orientedBox && object->m_shouldUseOuterOb) {
+            if (object->m_isOrientedBoxDirty) object->updateOrientedBox();
+            auto& corners = object->m_orientedBox->m_corners;
+            collider = noclip::wave::makeQuad({{
+                {corners[0].x, corners[0].y},
+                {corners[1].x, corners[1].y},
+                {corners[2].x, corners[2].y},
+                {corners[3].x, corners[3].y}
+            }});
+        }
+        // Ignore an object's unsupported or degenerate collision geometry.
+        if (!noclip::wave::valid(collider)) return std::nullopt;
+        if (special) scene.special.push_back(collider);
+        else scene.hazards.push_back(collider);
         if (scene.hazards.size() + scene.special.size() > kMaxCandidates)
             return std::nullopt;
     }
@@ -348,13 +371,18 @@ std::optional<noclip::wave::Decision> wavePredictedDelay(
         return std::nullopt;
 
     noclip::wave::State state;
-    state.x = player->m_position.x;
-    state.y = player->m_position.y;
+    // Do not guess an arbitrary 2px/3.5px wave hitbox. This is the
+    // collision shape GD uses for the small wave, including mini scale.
+    auto const rect = player->getObjectRect(.3f, .3f);
+    if (rect.size.width <= 0.f || rect.size.height <= 0.f)
+        return std::nullopt;
+    state.x = rect.getMidX();
+    state.y = rect.getMidY();
     state.dxPerFrame = dxPerStep;
     state.held = currentHeld;
     state.gravityReversed = player->m_isUpsideDown;
-    state.halfWidth = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
-    state.halfHeight = player->m_vehicleSize < 1.f ? 2.f : 3.5f;
+    state.halfWidth = rect.size.width * .5f;
+    state.halfHeight = rect.size.height * .5f;
     auto scene = waveObstacles(layer, state, cfg.waveHorizon);
     if (!scene) return std::nullopt;
 
@@ -531,6 +559,11 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
                         this->handleButton(edge.down, edge.button, edge.player1);
                         g_dispatchingBuffered = false;
                         g_session.lastSendStep[i] = step;
+                        if (cfg.logWave && playerMode(player) == 1)
+                            log::info("Noclip wave {}: DISPATCHED at step {} "
+                                      "(received step {}, delay {})",
+                                      edge.down ? "PRESS" : "RELEASE",
+                                      step, edge.receivedStep, step - edge.receivedStep);
                         rememberDelivered(layer, edge.player1, edge.down,
                                           playerMode(player), step, cfg);
                     }
@@ -561,5 +594,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.3.0 loaded: local wave snap prediction");
+    log::info("Noclip v0.4.0 loaded: shape-aware wave micro-prediction");
 }
