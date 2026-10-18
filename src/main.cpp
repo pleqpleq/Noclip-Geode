@@ -37,6 +37,7 @@ struct Config {
     bool predictWave;
     int waveHorizon;
     bool logWave;
+    bool directWaveDispatch;
 };
 
 Config config() {
@@ -51,7 +52,8 @@ Config config() {
         mod->getSettingValue<bool>("clear-learned"),
         mod->getSettingValue<bool>("predict-wave"),
         std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 60),
-        mod->getSettingValue<bool>("log-wave-decisions")
+        mod->getSettingValue<bool>("log-wave-decisions"),
+        mod->getSettingValue<bool>("wave-direct-dispatch")
     };
 }
 
@@ -555,15 +557,32 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
                         // user lets go before their buffered press is fired.
                         auto edge = event;
                         queue.pop_front();
-                        g_dispatchingBuffered = true;
-                        this->handleButton(edge.down, edge.button, edge.player1);
-                        g_dispatchingBuffered = false;
+                        // CBF filters GJBaseGameLayer::handleButton outside
+                        // its real-input window. Buffered jumps are deliberately
+                        // sent later; that filter may otherwise swallow them.
+                        // The wave only needs PlayerObject jump state, so
+                        // prefer a direct press/release for the wave. This is
+                        // configurable in case other mods depend on BGL hooks.
+                        bool directWave = cfg.directWaveDispatch
+                            && playerMode(player) == 1
+                            && edge.button == static_cast<int>(PlayerButton::Jump);
+                        if (directWave) {
+                            if (edge.down) player->pushButton(PlayerButton::Jump);
+                            else player->releaseButton(PlayerButton::Jump);
+                            g_session.deliveredHeld[i] = edge.down;
+                        } else {
+                            g_dispatchingBuffered = true;
+                            this->handleButton(edge.down, edge.button, edge.player1);
+                            g_dispatchingBuffered = false;
+                            g_session.deliveredHeld[i] = edge.down;
+                        }
                         g_session.lastSendStep[i] = step;
                         if (cfg.logWave && playerMode(player) == 1)
                             log::info("Noclip wave {}: DISPATCHED at step {} "
-                                      "(received step {}, delay {})",
+                                      "(received step {}, delay {}, route={})",
                                       edge.down ? "PRESS" : "RELEASE",
-                                      step, edge.receivedStep, step - edge.receivedStep);
+                                      step, edge.receivedStep, step - edge.receivedStep,
+                                      directWave ? "player-direct" : "game-layer");
                         rememberDelivered(layer, edge.player1, edge.down,
                                           playerMode(player), step, cfg);
                     }
@@ -594,5 +613,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.4.0 loaded: shape-aware wave micro-prediction");
+    log::info("Noclip v0.4.1 loaded: shape-aware wave prediction, CBF-aware dispatch");
 }

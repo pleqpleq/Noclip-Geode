@@ -1,4 +1,4 @@
-# Noclip v0.4.0 (experimental)
+# Noclip v0.4.1 (experimental)
 
 A Windows Geode mod that attempts to buffer an early wave press or release
 until a nearby locally predicted safe frame (5 physics frames by default).
@@ -14,7 +14,8 @@ perfect frames on unknown levels.
   incorrectly treating all of them as filled rectangular boxes.
 - Compares buffered press/release timings against the immediate obstacle
   rather than requiring a 20-frame straight hold to be safe.
-- Log wave decisions now also reports DISPATCHED press/release timestamps;
+- Direct buffered wave dispatch is now enabled by default for CBF compatibility. CBF can ignore delayed game-layer input calls outside its own input window; the wave-only direct PlayerObject press/release bypasses that filter. Turn it OFF if your setup conflicts with another mod.
+- Log wave decisions now also reports DISPATCHED press/release timestamps and dispatch path;
   this reveals whether a click was actually delayed or simply passed through.
 - Still avoids blind delaying unknown wave inputs; press/release ordering
   is retained after a buffered input.

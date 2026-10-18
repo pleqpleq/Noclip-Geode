@@ -5,9 +5,9 @@
   },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.4.0",
+  "version": "v0.4.1",
   "developer": "Supleq",
-  "description": "Experimental shape-aware buffered wave inputs using live hitboxes, triangular slope geometry and detailed debug logs.",
+  "description": "Experimental wave buffering: shape-aware trajectory and optional direct wave dispatch for CBF compatibility.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -76,6 +76,12 @@
       "type": "bool",
       "default": false,
       "description": "Log each wave input decision and the exact frame the buffered input is delivered."
+    },
+    "wave-direct-dispatch": {
+      "name": "Direct buffered wave dispatch (CBF compatibility)",
+      "type": "bool",
+      "default": true,
+      "description": "Send buffered wave presses/releases to PlayerObject directly instead of GJBaseGameLayer. This avoids CBF swallowing delayed inputs; disable if it conflicts with another input mod."
     }
   }
 }
