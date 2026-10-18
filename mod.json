@@ -1,0 +1,55 @@
+{
+  "geode": "5.11.2",
+  "gd": { "win": "2.2081" },
+  "id": "supleq.noclip",
+  "name": "Noclip",
+  "version": "v0.1.0",
+  "developer": "Supleq",
+  "description": "Selective frame-window input buffering for clicks and releases, with learned timing targets.",
+  "settings": {
+    "enabled": {
+      "name": "Enable Noclip timing",
+      "type": "bool",
+      "default": true
+    },
+    "window-frames": {
+      "name": "Timing window (frames)",
+      "description": "Maximum allowed early input offset, in game simulation steps. Default: 5. Set 0 to disable delay.",
+      "type": "int",
+      "default": 5,
+      "min": 0,
+      "max": 20,
+      "control": { "slider": true, "slider-step": 1, "arrows": true, "arrow-step": 1 }
+    },
+    "auto-learn": {
+      "name": "Learn inputs that survive",
+      "description": "Saves input timing positions after surviving at least 12 simulation steps. This does not prove an input was perfect.",
+      "type": "bool",
+      "default": true
+    },
+    "record-reference": {
+      "name": "Record reference timing (training)",
+      "description": "When on, delay is disabled and EVERY click/release is saved as a reference for the current level. Turn OFF after a clean practice run.",
+      "type": "bool",
+      "default": false
+    },
+    "blind-delay": {
+      "name": "Delay unlearned inputs too (experimental)",
+      "description": "When on, unfamiliar presses/releases are delayed by the full frame window. This IS NOT selective and may make timings worse.",
+      "type": "bool",
+      "default": false
+    },
+    "platformer": {
+      "name": "Enable in platformer levels (experimental)",
+      "description": "Platformer speed and direction changes can make timing anchors unreliable.",
+      "type": "bool",
+      "default": false
+    },
+    "clear-learned": {
+      "name": "Clear all timing references",
+      "description": "Toggle ON to permanently clear saved reference timings. Turn OFF again to resume learning.",
+      "type": "bool",
+      "default": false
+    }
+  }
+}
