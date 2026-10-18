@@ -3,6 +3,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 
 #include "TimingCore.hpp"
+#include "WavePredictor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,8 @@ struct Config {
     bool blindDelay;
     bool platformer;
     bool clearLearned;
+    bool predictWave;
+    int waveHorizon;
 };
 
 Config config() {
@@ -44,7 +47,9 @@ Config config() {
         mod->getSettingValue<bool>("record-reference"),
         mod->getSettingValue<bool>("blind-delay"),
         mod->getSettingValue<bool>("platformer"),
-        mod->getSettingValue<bool>("clear-learned")
+        mod->getSettingValue<bool>("clear-learned"),
+        mod->getSettingValue<bool>("predict-wave"),
+        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 60)
     };
 }
 
@@ -88,6 +93,8 @@ struct Session {
     std::array<float, 2> speed{0.f, 0.f};
     std::array<bool, 2> hasX{false, false};
     std::array<int, 2> lastSendStep{-100000, -100000};
+    // State of the inputs actually delivered to GD (not the physical keyboard).
+    std::array<bool, 2> deliveredHeld{false, false};
     std::array<std::deque<noclip::Deferred>, 2> delayed;
     std::array<std::deque<UnverifiedInput>, 2> unverified;
 
@@ -97,6 +104,7 @@ struct Session {
         speed = {0.f, 0.f};
         hasX = {false, false};
         lastSendStep = {-100000, -100000};
+        deliveredHeld = {false, false};
         for (auto& q : delayed) q.clear();
         for (auto& q : unverified) q.clear();
     }
@@ -252,6 +260,103 @@ void updateVelocity(PlayLayer* layer, int step) {
     }
 }
 
+// Collect currently active, static collision boxes. The predictor uses GD's
+// object type metadata instead of brittle lists of specific object IDs.
+// It intentionally does not simulate portals, orbs, triggers, move actions,
+// rotated polygon edges, or platformer movement. Unknown timing passes through.
+std::optional<std::vector<noclip::wave::Rect>> waveObstacles(
+    PlayLayer* layer, noclip::wave::State const& state, int horizon
+) {
+    if (!layer || !layer->m_objects || state.dxPerFrame <= .1f)
+        return std::nullopt; // Reversed X movement not modelled yet.
+    auto* children = layer->m_objects;
+
+    constexpr std::size_t kMaxCandidates = 1024;
+    std::vector<noclip::wave::Rect> hazards;
+    const float reach = state.dxPerFrame * horizon + 20.f;
+    const float start = state.x - 25.f;
+    const float end = state.x + reach;
+    const float vertical = std::abs(state.dxPerFrame) * horizon + 30.f;
+    for (auto* object : geode::cocos::CCArrayExt<GameObject>(children)) {
+        if (!object || object->m_isNoTouch || object->m_isDisabled) continue;
+        auto type = object->m_objectType;
+        bool collision = type == GameObjectType::Hazard
+            || type == GameObjectType::Solid
+            || type == GameObjectType::Breakable
+            || type == GameObjectType::Slope
+            || type == GameObjectType::AnimatedHazard;
+        // If a portal/pad/ring can change physics during our lookahead,
+        // our constant-slope prediction is NOT valid. Don't delay anything.
+        bool special = type == GameObjectType::InverseGravityPortal
+            || type == GameObjectType::NormalGravityPortal
+            || type == GameObjectType::WavePortal
+            || type == GameObjectType::CubePortal
+            || type == GameObjectType::ShipPortal
+            || type == GameObjectType::BallPortal
+            || type == GameObjectType::UfoPortal
+            || type == GameObjectType::RobotPortal
+            || type == GameObjectType::SpiderPortal
+            || type == GameObjectType::SwingPortal
+            || type == GameObjectType::TeleportPortal
+            || type == GameObjectType::MiniSizePortal
+            || type == GameObjectType::RegularSizePortal
+            || type == GameObjectType::GravityTogglePortal
+            || type == GameObjectType::YellowJumpPad
+            || type == GameObjectType::PinkJumpPad
+            || type == GameObjectType::GravityPad
+            || type == GameObjectType::RedJumpPad
+            || type == GameObjectType::YellowJumpRing
+            || type == GameObjectType::PinkJumpRing
+            || type == GameObjectType::RedJumpRing
+            || type == GameObjectType::GravityRing
+            || type == GameObjectType::GreenRing
+            || type == GameObjectType::DashRing
+            || type == GameObjectType::GravityDashRing
+            || type == GameObjectType::SpiderOrb
+            || type == GameObjectType::SpiderPad
+            || type == GameObjectType::TeleportOrb;
+        if (!collision && !special) continue;
+        auto rect = object->getObjectRect();
+        noclip::wave::Rect box{
+            rect.getMinX(), rect.getMinY(), rect.getMaxX(), rect.getMaxY()
+        };
+        if (!noclip::wave::valid(box)) continue;
+        if (box.right < start || box.left > end
+            || box.top < state.y - vertical || box.bottom > state.y + vertical)
+            continue;
+        if (special) return std::nullopt;
+        hazards.push_back(box);
+        if (hazards.size() > kMaxCandidates) return std::nullopt;
+    }
+    return hazards;
+}
+
+std::optional<int> wavePredictedDelay(
+    PlayLayer* layer, PlayerObject* player, bool currentHeld,
+    bool down, float dxPerStep, Config const& cfg
+) {
+    if (!cfg.predictWave || !player->m_isDart || layer->m_isPlatformer
+        || !std::isfinite(dxPerStep) || dxPerStep <= .1f)
+        return std::nullopt;
+
+    noclip::wave::State state;
+    state.x = player->m_position.x;
+    state.y = player->m_position.y;
+    state.dxPerFrame = dxPerStep;
+    state.held = currentHeld;
+    state.gravityReversed = player->m_isUpsideDown;
+    state.halfWidth = player->m_isMini ? 2.f : 3.5f;
+    state.halfHeight = player->m_isMini ? 2.f : 3.5f;
+    auto hazards = waveObstacles(layer, state, cfg.waveHorizon);
+    if (!hazards) return std::nullopt;
+
+    auto choice = noclip::wave::chooseDelay(
+        state, down, cfg.window, cfg.waveHorizon, *hazards
+    );
+    if (!choice.evaluated) return std::nullopt;
+    return choice.delayFrames;  // 0 => the current click passes through.
+}
+
 bool inPlay(PlayLayer* layer, Config const& cfg) {
     return layer && layer->m_level && !layer->m_isPaused
         && !layer->m_playerDied && !layer->m_useReplay
@@ -270,6 +375,9 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             || !inPlay(layer, cfg) || layer != static_cast<GJBaseGameLayer*>(this)
             || button != static_cast<int>(PlayerButton::Jump)) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            if (layer && layer == static_cast<GJBaseGameLayer*>(this)
+                && button == static_cast<int>(PlayerButton::Jump))
+                g_session.deliveredHeld[isPlayer1 ? 0 : 1] = down;
             return;
         }
 
@@ -291,20 +399,32 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
         // the current attempt's inputs.
         if (cfg.recordReference) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            g_session.deliveredHeld[i] = down;
             if (!cfg.clearLearned) {
                 addReference({g_session.level, isPlayer1, down, mode, x}, true);
             }
             return;
         }
 
-        auto found = nearestReference(
+        // Wave prediction is first choice; it does not require learning.
+        // A queued press/release must flush before another edge can run.
+        bool preserveQueueOrder = !g_session.delayed[i].empty();
+        bool waveMode = cfg.predictWave && mode == 1;
+        auto waveDelay = (waveMode && !preserveQueueOrder)
+            ? wavePredictedDelay(layer, player, g_session.deliveredHeld[i],
+                                 down, g_session.speed[i], cfg)
+            : std::nullopt;
+        // While wave prediction is enabled, never fall back to unreliable
+        // recorded anchors or blind delay for unrecognized wave obstacles.
+        auto found = waveMode ? std::optional<float>{} : nearestReference(
             g_session.level, isPlayer1, down, mode,
             x, g_session.speed[i], cfg.window
         );
-        bool blind = cfg.blindDelay && !found.has_value();
-        bool preserveQueueOrder = !g_session.delayed[i].empty();
-        if (!found && !blind && !preserveQueueOrder) {
+        bool blind = !waveMode && cfg.blindDelay && !found.has_value();
+        bool predictiveDelay = waveDelay.has_value() && *waveDelay > 0;
+        if (!found && !blind && !preserveQueueOrder && !predictiveDelay) {
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            g_session.deliveredHeld[i] = down;
             rememberDelivered(layer, isPlayer1, down, mode, step, cfg);
             g_session.lastSendStep[i] = step;
             return;
@@ -315,6 +435,7 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
             // Overflow: clear stale deferred edges instead of inverting them.
             pending.clear();
             GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            g_session.deliveredHeld[i] = down;
             return;
         }
         noclip::Deferred event;
@@ -322,7 +443,8 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
         event.button = button;
         event.player1 = isPlayer1;
         event.receivedStep = step;
-        event.expiresStep = step + (found || blind ? cfg.window : 0);
+        event.expiresStep = step + (predictiveDelay ? *waveDelay
+            : (found || blind ? cfg.window : 0));
         event.hasTarget = found.has_value();
         event.targetX = found.value_or(0.f);
         event.direction = noclip::normalizeDirection(g_session.speed[i]);
@@ -399,5 +521,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.1.0 loaded: timing window defaults to 5 steps");
+    log::info("Noclip v0.2.0 loaded: hidden wave trajectory preview enabled");
 }

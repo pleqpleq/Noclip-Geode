@@ -1,11 +1,13 @@
 {
   "geode": "5.11.2",
-  "gd": { "win": "2.2081" },
+  "gd": {
+    "win": "2.2081"
+  },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "developer": "Supleq",
-  "description": "Selective frame-window input buffering for clicks and releases, with learned timing targets.",
+  "description": "Experimental hidden wave trajectory prediction for press/release correction.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -19,13 +21,18 @@
       "default": 5,
       "min": 0,
       "max": 20,
-      "control": { "slider": true, "slider-step": 1, "arrows": true, "arrow-step": 1 }
+      "control": {
+        "slider": true,
+        "slider-step": 1,
+        "arrows": true,
+        "arrow-step": 1
+      }
     },
     "auto-learn": {
       "name": "Learn inputs that survive",
       "description": "Saves input timing positions after surviving at least 12 simulation steps. This does not prove an input was perfect.",
       "type": "bool",
-      "default": true
+      "default": false
     },
     "record-reference": {
       "name": "Record reference timing (training)",
@@ -50,6 +57,19 @@
       "description": "Toggle ON to permanently clear saved reference timings. Turn OFF again to resume learning.",
       "type": "bool",
       "default": false
+    },
+    "predict-wave": {
+      "name": "Hidden wave trajectory correction (experimental)",
+      "type": "bool",
+      "default": true,
+      "description": "Predict safe wave press/release timings without drawing the trajectory."
+    },
+    "wave-horizon": {
+      "name": "Wave lookahead (frames)",
+      "type": "int",
+      "default": 20,
+      "min": 12,
+      "max": 60
     }
   }
 }
