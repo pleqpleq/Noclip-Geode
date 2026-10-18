@@ -5,9 +5,9 @@
   },
   "id": "supleq.noclip",
   "name": "Noclip",
-  "version": "v0.4.1",
+  "version": "v0.4.2",
   "developer": "Supleq",
-  "description": "Experimental wave buffering: shape-aware trajectory and optional direct wave dispatch for CBF compatibility.",
+  "description": "Experimental wave timing assistant with diagnostic logging for skipped input, scene scan, and buffered dispatch.",
   "settings": {
     "enabled": {
       "name": "Enable Noclip timing",
@@ -75,7 +75,7 @@
       "name": "Log wave decisions (debug)",
       "type": "bool",
       "default": false,
-      "description": "Log each wave input decision and the exact frame the buffered input is delivered."
+      "description": "Log all jump inputs including early bypasses, wave collision scan, timing selection and actual buffered dispatch to Geode log. Enable for troubleshooting."
     },
     "wave-direct-dispatch": {
       "name": "Direct buffered wave dispatch (CBF compatibility)",

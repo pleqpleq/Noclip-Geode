@@ -1,44 +1,42 @@
-# Noclip v0.4.1 (experimental)
+# Noclip v0.4.2 — diagnostics build (NOT validated in-game)
 
-A Windows Geode mod that attempts to buffer an early wave press or release
-until a nearby locally predicted safe frame (5 physics frames by default).
-The wave trajectory is hidden. It is NOT actual noclip and cannot guarantee
-perfect frames on unknown levels.
+This experimental Geode mod attempts to snap an early wave press or release
+forward by up to 5 simulation frames using a limited prediction of static
+collision geometry. Compilation and portable geometry tests do not prove it
+works on Geometry Dash levels. **No guarantee of perfect inputs.**
 
-## Changes since v0.3.0
+## Why v0.4.2
 
-- Uses the live GD wave hitbox from PlayerObject::getObjectRect(.3f,.3f)
-  rather than hardcoded player hitbox dimensions.
-- Uses triangle collision polygons for slope objects, rotated four-corner
-  polygons for oriented objects, and circles for circular obstacles instead of
-  incorrectly treating all of them as filled rectangular boxes.
-- Compares buffered press/release timings against the immediate obstacle
-  rather than requiring a 20-frame straight hold to be safe.
-- Direct buffered wave dispatch is now enabled by default for CBF compatibility. CBF can ignore delayed game-layer input calls outside its own input window; the wave-only direct PlayerObject press/release bypasses that filter. Turn it OFF if your setup conflicts with another mod.
-- Log wave decisions now also reports DISPATCHED press/release timestamps and dispatch path;
-  this reveals whether a click was actually delayed or simply passed through.
-- Still avoids blind delaying unknown wave inputs; press/release ordering
-  is retained after a buffered input.
+Multiple successful builds were reported, but live gameplay still failed.
+The preceding builds log only after their initial eligibility checks; if
+your click is skipped before those checks, the log contains no explanation.
+v0.4.2 adds logging **before every pass-through gate**.
 
-## Install
-Visit GitHub Actions for the latest green Build Noclip for Windows run:
-https://github.com/pleqpleq/Noclip-Geode/actions
+## Diagnose it in one test
 
-Download artifact Noclip-Windows-Geode, extract the .geode package, install
-through Geode, and restart Geometry Dash. Targets Windows GD 2.2081 only.
+1. Install a Windows Geode artifact from the latest successful build in
+   https://github.com/pleqpleq/Noclip-Geode/actions
+   (this project currently targets GD 2.2081).
+2. In Geode > Noclip Settings, turn on **Log wave decisions (debug)**.
+3. Restart the level and reproduce *one* failed wave input.
+4. Go to your Geometry Dash installation directory > `geode/logs`.
+5. Send the latest log file or copy lines containing `Noclip`.
 
-## Diagnose one missed click
+Interpretation:
+- `Noclip v0.4.2 loaded` but no `Noclip INPUT` lines:
+  the mod's game-layer hook never received your jump event.
+- `play=false editor=true`: the mod bypasses editor playtesting.
+- `eligible=false` or `wave=false`: the assistance was gated off.
+- `scan hazards=0`: it didn't find nearby collision objects.
+- `unavailable`, `already-safe`, `no-safe-frame`: it chose no delay.
+- `buffered` and `DISPATCHED`: input was queued and sent.
+- `heldNow` does not match `expectedHeld`: an input hook may have
+  prevented the event from reaching the player.
 
-In Noclip settings enable Log wave decisions (debug). Reproduce the missed
-wave turn once. Open Geode's log and send the lines beginning Noclip wave.
-Examples:
-- "buffered, delay=3" then "DISPATCHED ... delay 3": queued and delivered.
-- "no-safe-frame": model found no safe trajectory within window.
-- "already-safe": model incorrectly considered current input harmless.
-- "unavailable": game state/speed not supported.
+TESTMODE text **alone** is not proof of editor playtesting: start positions
+also display TESTMODE in normal level play.
 
-**Not yet tested inside the running game.** This is a read-only, approximate
-trajectory model using current wave speed and obstacle collision geometry;
-moving obstacles, triggers, collision quirks, and game/mod hook interactions
-can still invalidate predictions. Never present assisted completions as
-unassisted.
+Features remain experimental. The predictor still does not simulate the real
+GD collision engine or moving triggers, and can't reliably correct arbitrary
+frame-perfect gaps. The purpose of this build is evidence-based debugging,
+not another unsupported accuracy claim.

@@ -386,7 +386,18 @@ std::optional<noclip::wave::Decision> wavePredictedDelay(
     state.halfWidth = rect.size.width * .5f;
     state.halfHeight = rect.size.height * .5f;
     auto scene = waveObstacles(layer, state, cfg.waveHorizon);
-    if (!scene) return std::nullopt;
+    if (!scene) {
+        if (cfg.logWave)
+            log::info("Noclip WAVE: obstacle scan unavailable");
+        return std::nullopt;
+    }
+    if (cfg.logWave)
+        log::info(
+            "Noclip WAVE: scan hazards={} specials={} hitbox=({:.2f},{:.2f}) "
+            "player=({:.2f},{:.2f}) speed={:.3f}",
+            scene->hazards.size(), scene->special.size(),
+            rect.size.width, rect.size.height, state.x, state.y, dxPerStep
+        );
 
     return noclip::wave::chooseDelay(
         state, down, cfg.window, cfg.waveHorizon,
@@ -408,6 +419,25 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
         // across cube, wave, ship, UFO, ball, robot, spider, and swing.
         auto* layer = PlayLayer::get();
         auto cfg = config();
+
+        // Log BEFORE ANY pass-through checks. Earlier builds never logged
+        // jump events when the active game layer wasn't a PlayLayer (editor
+        // test), or when another early gate blocked the assist.
+        if (cfg.logWave && !g_dispatchingBuffered
+            && button == static_cast<int>(PlayerButton::Jump)) {
+            auto* editor = LevelEditorLayer::get();
+            auto* base = static_cast<GJBaseGameLayer*>(this);
+            bool eligible = inPlay(layer, cfg);
+            bool isWave = layer && layer->m_player1 && layer->m_player1->m_isDart;
+            log::info(
+                "Noclip INPUT {}: enabled={} window={} play={} editor={} "
+                "layerMatch={} eligible={} wave={} step={}",
+                down ? "PRESS" : "RELEASE", cfg.enabled, cfg.window,
+                layer != nullptr, editor != nullptr, layer == base,
+                eligible, isWave,
+                layer ? layer->m_currentStep : -1
+            );
+        }
         if (g_dispatchingBuffered || !cfg.enabled || cfg.window == 0
             || !inPlay(layer, cfg) || layer != static_cast<GJBaseGameLayer*>(this)
             || button != static_cast<int>(PlayerButton::Jump)) {
@@ -577,12 +607,17 @@ class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
                             g_session.deliveredHeld[i] = edge.down;
                         }
                         g_session.lastSendStep[i] = step;
-                        if (cfg.logWave && playerMode(player) == 1)
+                        if (cfg.logWave && playerMode(player) == 1) {
+                            bool actuallyHeld = player->m_holdingButtons[
+                                static_cast<int>(PlayerButton::Jump)];
                             log::info("Noclip wave {}: DISPATCHED at step {} "
-                                      "(received step {}, delay {}, route={})",
+                                      "(received {}, delay {}, route={}, "
+                                      "heldNow={}, expectedHeld={})",
                                       edge.down ? "PRESS" : "RELEASE",
                                       step, edge.receivedStep, step - edge.receivedStep,
-                                      directWave ? "player-direct" : "game-layer");
+                                      directWave ? "player-direct" : "game-layer",
+                                      actuallyHeld, edge.down);
+                        }
                         rememberDelivered(layer, edge.player1, edge.down,
                                           playerMode(player), step, cfg);
                     }
@@ -613,5 +648,5 @@ class $modify(NoclipPlayLayer, PlayLayer) {
 };
 
 $on_mod(Loaded) {
-    log::info("Noclip v0.4.1 loaded: shape-aware wave prediction, CBF-aware dispatch");
+    log::info("Noclip v0.4.2 loaded: debug input pipeline diagnostics");
 }
