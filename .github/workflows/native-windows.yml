@@ -1,7 +1,7 @@
 name: Native standalone Windows build
 on:
   push:
-    branches: [main]
+    branches: [main, native-standalone]
   workflow_dispatch:
 jobs:
   portable-tests:
