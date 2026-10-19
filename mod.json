@@ -1,102 +1,47 @@
 {
   "geode": "5.11.2",
-  "gd": {
-    "win": "2.2081"
-  },
+  "gd": { "win": "2.2081" },
   "id": "supleq.noclip",
-  "name": "Noclip",
-  "version": "v0.5.0",
+  "name": "Noclip - Input Buffer Lab",
+  "version": "v0.6.0",
   "developer": "Supleq",
-  "description": "Experimental invisible wave early-input buffering, adjustable up to 300ms. Press and release correction requires a predicted safe path.",
+  "description": "Experimental wave input buffering. Includes exact-delay test mode and an unverified collision-based predictor. Automatically bypasses dual and CBF.",
   "settings": {
     "enabled": {
-      "name": "Enable Noclip timing",
       "type": "bool",
-      "default": true
-    },
-    "window-frames": {
-      "name": "Timing window (frames)",
-      "description": "Only for old learned reference timings (cube/other modes). Wave instead uses Wave early input buffer (milliseconds). Default 5 physics frames.",
-      "type": "int",
-      "default": 5,
-      "min": 0,
-      "max": 20,
-      "control": {
-        "slider": true,
-        "slider-step": 1,
-        "arrows": true,
-        "arrow-step": 1
-      }
-    },
-    "auto-learn": {
-      "name": "Learn inputs that survive",
-      "description": "Saves input timing positions after surviving at least 12 simulation steps. This does not prove an input was perfect.",
-      "type": "bool",
-      "default": false
-    },
-    "record-reference": {
-      "name": "Record reference timing (training)",
-      "description": "When on, delay is disabled and EVERY click/release is saved as a reference for the current level. Turn OFF after a clean practice run.",
-      "type": "bool",
-      "default": false
-    },
-    "blind-delay": {
-      "name": "Delay unlearned inputs too (experimental)",
-      "description": "When on, unfamiliar presses/releases are delayed by the full frame window. This IS NOT selective and may make timings worse.",
-      "type": "bool",
-      "default": false
-    },
-    "platformer": {
-      "name": "Enable in platformer levels (experimental)",
-      "description": "Platformer speed and direction changes can make timing anchors unreliable.",
-      "type": "bool",
-      "default": false
-    },
-    "clear-learned": {
-      "name": "Clear all timing references",
-      "description": "Toggle ON to permanently clear saved reference timings. Turn OFF again to resume learning.",
-      "type": "bool",
-      "default": false
-    },
-    "predict-wave": {
-      "name": "Hidden wave trajectory correction (experimental)",
-      "type": "bool",
-      "default": true,
-      "description": "Shape-aware hidden wave press/release timing assist (still experimental; not guaranteed perfect)."
-    },
-    "wave-horizon": {
-      "name": "Wave lookahead (frames)",
-      "type": "int",
-      "default": 76,
-      "min": 12,
-      "max": 140,
-      "description": "How far ahead to search for wave collisions in physics steps; the mod automatically raises this above the early buffer."
-    },
-    "log-wave-decisions": {
-      "name": "Log wave decisions (debug)",
-      "type": "bool",
+      "name": "Enable input correction (OFF by default)",
       "default": false,
-      "description": "Log all jump inputs including early bypasses, wave collision scan, timing selection and actual buffered dispatch to Geode log. Enable for troubleshooting."
+      "description": "Experimental. Turn on only when testing a copy or practice level. Gameplay is assisted."
     },
-    "wave-direct-dispatch": {
-      "name": "Direct buffered wave dispatch (CBF compatibility)",
-      "type": "bool",
+    "max-wave-ticks": {
+      "type": "int", "name": "Wave correction limit (physics ticks)",
+      "default": 4, "min": 1, "max": 8,
+      "description": "Maximum predictive wave input delay. 4 ticks is about 16.7ms at 240 TPS."
+    },
+    "lookahead-ticks": {
+      "type": "int", "name": "Prediction lookahead (physics ticks)",
+      "default": 18, "min": 12, "max": 48,
+      "description": "Only approximate static hazard collision prediction. Larger values can wrongly reject future multi-click wave corridors."
+    },
+    "fixed-delay-test": {
+      "type": "bool", "name": "Diagnostic: force exact delay",
+      "default": false,
+      "description": "Disables prediction and buffers every single-player wave press AND release for exactly N physics ticks. Use only in a safe test level to verify that input interception and delivery actually work."
+    },
+    "fixed-delay-ticks": {
+      "type": "int", "name": "Diagnostic delay amount (ticks)",
+      "default": 2, "min": 1, "max": 8,
+      "description": "Used only with Diagnostic: force exact delay."
+    },
+    "debug-logging": {
+      "type": "bool", "name": "Log every buffered input and prediction",
+      "default": false,
+      "description": "See original tick, selected delay, predicted survival score, dispatch tick, and observed button held state in geode/logs."
+    },
+    "f6-cycle": {
+      "type": "bool", "name": "F6 cycles stages (2/4/8/8/OFF)",
       "default": true,
-      "description": "Send buffered wave presses/releases to PlayerObject directly instead of GJBaseGameLayer. This avoids CBF swallowing delayed inputs; disable if it conflicts with another input mod."
-    },
-    "wave-early-buffer-ms": {
-      "name": "Wave early input buffer (milliseconds)",
-      "description": "Maximum time an early wave PRESS or RELEASE may be held while searching for a predicted safe frame. Default 200ms ~= 48 physics steps at 240 TPS. Independent of the 5-frame reference setting.",
-      "type": "int",
-      "default": 200,
-      "min": 0,
-      "max": 300,
-      "control": {
-        "slider": true,
-        "slider-step": 10,
-        "arrows": true,
-        "arrow-step": 10
-      }
+      "description": "Temporary max-delay stage selection until restart. Stage OFF fully disables correction, even if Enable is on."
     }
   }
 }

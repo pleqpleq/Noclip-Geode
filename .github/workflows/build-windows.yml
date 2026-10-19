@@ -1,4 +1,4 @@
-name: Build Noclip for Windows
+name: Build Noclip Input Buffer Lab (Win)
 on:
   push:
     branches: [main]
@@ -10,12 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: g++ -std=c++20 -O2 tests/test_wave.cpp -o /tmp/test_wave && /tmp/test_wave
+      - name: Compile and test independent queue
+        run: g++ -std=c++20 -O2 -Wall -Wextra tests/queue_tests.cpp -o /tmp/testqueue && /tmp/testqueue
+      - name: Compile and test trajectory geometry
+        run: g++ -std=c++20 -O2 -Wall -Wextra tests/wave_tests.cpp -o /tmp/testwave && /tmp/testwave
   build:
     runs-on: windows-latest
+    needs: [tests]
     steps:
       - uses: actions/checkout@v4
-      - name: Build mod
+      - name: Build Geode Win64
         id: build
         uses: geode-sdk/build-geode-mod@main
         with:

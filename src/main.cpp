@@ -1,676 +1,357 @@
 #include <Geode/Geode.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 
-#include "TimingCore.hpp"
-#include "WavePredictor.hpp"
+#include "InputQueue.hpp"
+#include "WavePreview.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <deque>
-#include <iomanip>
-#include <limits>
 #include <optional>
-#include <sstream>
-#include <string>
 #include <vector>
 
 using namespace geode::prelude;
 
 namespace {
-
-constexpr int kSurvivalSteps = 12;
-constexpr std::size_t kMaxAnchors = 8000;
-constexpr std::size_t kMaxQueuedPerPlayer = 48;
-constexpr std::size_t kMaxLearningPerPlayer = 96;
-
-struct Config {
-    bool enabled;
-    int window;
-    bool autoLearn;
-    bool recordReference;
-    bool blindDelay;
-    bool platformer;
-    bool clearLearned;
-    bool predictWave;
-    int waveHorizon;
-    bool logWave;
-    bool directWaveDispatch;
-    int waveEarlyBufferMs;
-    int waveEarlyBufferSteps;
+// An input is only intercepted in a normal single-player WAVE.  These
+// safeguards are deliberate: dual mode and CBF have their own input systems.
+struct Settings {
+    bool enabled = false;
+    bool fixedDelayTest = false;
+    bool debug = false;
+    bool f6Enabled = true;
+    int fixedTicks = 2;
+    int maxTicks = 4;
+    int lookahead = 18;
 };
 
-Config config() {
+int g_stageOverride = -1;
+constexpr std::array<int, 5> kStages{2, 4, 8, 8, 0};
+std::uint64_t g_resetEpoch = 1;
+bool g_warnedCbf = false;
+
+Settings readSettings() {
     auto* mod = Mod::get();
-    int waveMs = std::clamp(
-        static_cast<int>(mod->getSettingValue<int64_t>("wave-early-buffer-ms")),
-        0, 300
-    );
-    // Current Windows GD 2.2081 uses a nominal 240 physics steps per second.
-    // This is deliberately separate from the older learned-timing window.
-    int waveTicks = std::clamp(
-        static_cast<int>(std::ceil(waveMs * 240.0 / 1000.0)), 0, 72
-    );
-    return {
-        mod->getSettingValue<bool>("enabled"),
-        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("window-frames")), 0, 20),
-        mod->getSettingValue<bool>("auto-learn"),
-        mod->getSettingValue<bool>("record-reference"),
-        mod->getSettingValue<bool>("blind-delay"),
-        mod->getSettingValue<bool>("platformer"),
-        mod->getSettingValue<bool>("clear-learned"),
-        mod->getSettingValue<bool>("predict-wave"),
-        std::clamp(static_cast<int>(mod->getSettingValue<int64_t>("wave-horizon")), 12, 140),
-        mod->getSettingValue<bool>("log-wave-decisions"),
-        mod->getSettingValue<bool>("wave-direct-dispatch"),
-        waveMs,
-        waveTicks
-    };
+    Settings cfg;
+    cfg.enabled = mod->getSettingValue<bool>("enabled");
+    cfg.fixedDelayTest = mod->getSettingValue<bool>("fixed-delay-test");
+    cfg.debug = mod->getSettingValue<bool>("debug-logging");
+    cfg.f6Enabled = mod->getSettingValue<bool>("f6-cycle");
+    cfg.fixedTicks = std::clamp(
+        static_cast<int>(mod->getSettingValue<int64_t>("fixed-delay-ticks")), 1, 8);
+    cfg.maxTicks = std::clamp(
+        static_cast<int>(mod->getSettingValue<int64_t>("max-wave-ticks")), 1, 8);
+    cfg.lookahead = std::clamp(
+        static_cast<int>(mod->getSettingValue<int64_t>("lookahead-ticks")), 12, 48);
+    if (g_stageOverride >= 0)
+        cfg.maxTicks = kStages[g_stageOverride];
+    return cfg;
 }
 
-// Capturing the mode ensures a wave release is never snapped to a cube press,
-// or a different type of gameplay in the same approximate level position.
-int playerMode(PlayerObject const* player) {
-    if (player->m_isDart) return 1;    // Wave
-    if (player->m_isShip) return 2;
-    if (player->m_isBird) return 3;    // UFO
-    if (player->m_isBall) return 4;
-    if (player->m_isRobot) return 5;
-    if (player->m_isSpider) return 6;
-    if (player->m_isSwing) return 7;
-    return 0;                        // Cube / other
+bool cbfInstalled() {
+    return Loader::get()->isModLoaded("syzzi.click_between_frames");
 }
 
-std::string levelKey(PlayLayer* layer) {
-    if (!layer || !layer->m_level) return "";
-    auto* level = layer->m_level;
-    // Including the level name and serialized length separates most local
-    // levels, which often all have an online ID of 0.
-    return std::to_string(static_cast<int>(level->m_levelID))
-        + ":" + std::string(level->m_levelName)
-        + ":" + std::to_string(level->m_levelString.size());
+bool dualMode(GJBaseGameLayer* layer) {
+    if (!layer) return true;
+    // m_gameState is authoritative when a dual portal changes modes midlevel.
+    // Two-player-mode level setting also implies that we should not buffer.
+    if (layer->m_gameState.m_isDualMode) return true;
+    if (layer->m_levelSettings && layer->m_levelSettings->m_twoPlayerMode)
+        return true;
+    return false;
 }
 
-struct UnverifiedInput {
-    std::string level;
-    int step = 0;
-    float x = 0.f;
-    bool player1 = true;
-    bool down = true;
-    int mode = 0;
+bool mayBuffer(GJBaseGameLayer* layer, Settings const& cfg) {
+    if (!cfg.enabled || cfg.maxTicks == 0 || cbfInstalled()) return false;
+    auto* play = PlayLayer::get();
+    if (!play || static_cast<GJBaseGameLayer*>(play) != layer) return false;
+    if (play->m_playerDied || play->m_isPaused || play->m_useReplay
+        || play->m_isPlatformer || dualMode(layer)) return false;
+    if (!layer->m_player1 || layer->m_player1->m_isDead) return false;
+    return layer->m_player1->m_isDart;
+}
+
+// The only game objects we predict are currently active static solid/hazard
+// shapes. Portals/orbs are tracked as unknown physics and disable prediction
+// along the sampled trajectories. This is NOT the actual GD physics engine.
+struct Scene {
+    std::vector<noclip::wave::Collider> hazards;
+    std::vector<noclip::wave::Collider> specials;
 };
 
-struct Session {
-    PlayLayer* layer = nullptr;
-    std::string level;
-    int lastStep = std::numeric_limits<int>::min();
-    std::array<float, 2> lastX{0.f, 0.f};
-    std::array<float, 2> speed{0.f, 0.f};
-    std::array<bool, 2> hasX{false, false};
-    std::array<int, 2> lastSendStep{-100000, -100000};
-    // State of the inputs actually delivered to GD (not the physical keyboard).
-    std::array<bool, 2> deliveredHeld{false, false};
-    std::array<std::deque<noclip::Deferred>, 2> delayed;
-    std::array<std::deque<UnverifiedInput>, 2> unverified;
-
-    void resetTransient() {
-        lastStep = std::numeric_limits<int>::min();
-        lastX = {0.f, 0.f};
-        speed = {0.f, 0.f};
-        hasX = {false, false};
-        lastSendStep = {-100000, -100000};
-        deliveredHeld = {false, false};
-        for (auto& q : delayed) q.clear();
-        for (auto& q : unverified) q.clear();
-    }
-
-    void bind(PlayLayer* pl) {
-        if (layer == pl && level == levelKey(pl)) return;
-        resetTransient();
-        layer = pl;
-        level = levelKey(pl);
-    }
-};
-
-Session g_session;
-std::vector<noclip::Anchor> g_anchors;
-bool g_loaded = false;
-bool g_dispatchingBuffered = false;
-bool g_dirty = false;
-
-void saveAnchors() {
-    std::ostringstream out;
-    out << std::setprecision(9);
-    for (auto const& a : g_anchors) {
-        out << std::quoted(a.levelKey) << ' ' << a.player1 << ' '
-            << a.down << ' ' << a.mode << ' ' << a.x << '\n';
-    }
-    Mod::get()->setSavedValue("reference-positions-v1", out.str());
-    g_dirty = false;
-}
-
-void loadAnchors() {
-    if (g_loaded) return;
-    g_loaded = true;
-    std::istringstream in(
-        Mod::get()->getSavedValue<std::string>("reference-positions-v1", "")
-    );
-    noclip::Anchor a;
-    while (in >> std::quoted(a.levelKey) >> a.player1 >> a.down
-              >> a.mode >> a.x) {
-        if (!std::isfinite(a.x) || a.levelKey.size() > 300) continue;
-        if (g_anchors.size() >= kMaxAnchors) break;
-        g_anchors.push_back(a);
-    }
-    log::info("Noclip loaded {} timing references", g_anchors.size());
-}
-
-void clearReferencesIfRequested(Config const& cfg) {
-    if (!cfg.clearLearned) return;
-    loadAnchors();
-    if (!g_anchors.empty()) {
-        g_anchors.clear();
-        g_dirty = true;
-        saveAnchors();
-        log::info("Noclip timing references cleared");
+bool isSpecial(GameObjectType type) {
+    switch (type) {
+        case GameObjectType::InverseGravityPortal:
+        case GameObjectType::NormalGravityPortal:
+        case GameObjectType::GravityTogglePortal:
+        case GameObjectType::CubePortal:
+        case GameObjectType::ShipPortal:
+        case GameObjectType::WavePortal:
+        case GameObjectType::BallPortal:
+        case GameObjectType::UfoPortal:
+        case GameObjectType::RobotPortal:
+        case GameObjectType::SpiderPortal:
+        case GameObjectType::SwingPortal:
+        case GameObjectType::TeleportPortal:
+        case GameObjectType::MiniSizePortal:
+        case GameObjectType::RegularSizePortal:
+        case GameObjectType::YellowJumpRing:
+        case GameObjectType::PinkJumpRing:
+        case GameObjectType::RedJumpRing:
+        case GameObjectType::GravityRing:
+        case GameObjectType::GreenRing:
+        case GameObjectType::YellowJumpPad:
+        case GameObjectType::PinkJumpPad:
+        case GameObjectType::RedJumpPad:
+        case GameObjectType::GravityPad:
+        case GameObjectType::DashRing:
+        case GameObjectType::GravityDashRing:
+        case GameObjectType::SpiderOrb:
+        case GameObjectType::SpiderPad:
+        case GameObjectType::TeleportOrb:
+            return true;
+        default:
+            return false;
     }
 }
 
-PlayerObject* playerFor(PlayLayer* layer, bool player1) {
-    return layer ? (player1 ? layer->m_player1 : layer->m_player2) : nullptr;
-}
-
-void addReference(noclip::Anchor const& incoming, bool manual) {
-    if (incoming.levelKey.empty() || !std::isfinite(incoming.x)) return;
-    loadAnchors();
-    // Preserve different edges and modes, even at almost identical positions.
-    for (auto& old : g_anchors) {
-        if (old.levelKey != incoming.levelKey || old.player1 != incoming.player1
-            || old.down != incoming.down || old.mode != incoming.mode) continue;
-        if (std::abs(old.x - incoming.x) <= 2.f) {
-            if (manual && old.x != incoming.x) {
-                old.x = incoming.x;
-                g_dirty = true;
-            }
-            return;
-        }
-    }
-    if (g_anchors.size() >= kMaxAnchors) g_anchors.erase(g_anchors.begin());
-    g_anchors.push_back(incoming);
-    g_dirty = true;
-}
-
-// Choose an already-learned target ahead of the current player position and
-// no more than the configured number of *physics steps* away.
-std::optional<float> nearestReference(
-    std::string const& level, bool player1, bool down, int mode,
-    float x, float signedSpeed, int window
+std::optional<Scene> sceneFor(
+    GJBaseGameLayer* layer, noclip::wave::State const& state, int horizon
 ) {
-    float nearest = std::numeric_limits<float>::infinity();
-    std::optional<float> result;
-    for (auto const& a : g_anchors) {
-        if (a.levelKey != level || a.player1 != player1 || a.down != down
-            || a.mode != mode) continue;
-        if (!noclip::isWithinEarlyWindow(x, a.x, signedSpeed, window)) continue;
-        float dist = std::abs(a.x - x);
-        if (dist < nearest) {
-            nearest = dist;
-            result = a.x;
+    if (!layer || !layer->m_objects) return std::nullopt;
+    using namespace noclip::wave;
+    Scene result;
+    result.hazards.reserve(64);
+    result.specials.reserve(16);
+    float xMin=state.x-12.f;
+    float xMax=state.x+state.dx*horizon+16.f;
+    float yReach=std::abs(state.dx)*state.verticalSlope*horizon+20.f;
+    for (GameObject* object : geode::cocos::CCArrayExt<GameObject*>(layer->m_objects)) {
+        if (!object || object->m_isNoTouch || object->m_isDisabled
+            || object->m_isPassable || object->m_isDecoration) continue;
+        auto type=object->m_objectType;
+        bool dangerous=(type==GameObjectType::Solid
+            || type==GameObjectType::Hazard
+            || type==GameObjectType::AnimatedHazard
+            || type==GameObjectType::Slope);
+        bool special=isSpecial(type);
+        if(!dangerous && !special)continue;
+        auto r=object->getObjectRect();
+        Rect hitbox{r.getMinX(),r.getMinY(),r.getMaxX(),r.getMaxY()};
+        if(!valid(hitbox))continue;
+        if(hitbox.right<xMin || hitbox.left>xMax ||
+           hitbox.top<state.y-yReach || hitbox.bottom>state.y+yReach)continue;
+        Collider shape=box(hitbox);
+        if(type==GameObjectType::Slope)
+            shape=triangle(hitbox,object->m_slopeDirection);
+        else if(object->m_objectRadius>0.f) {
+            float radius=object->m_objectRadius*std::max(
+                std::abs(object->m_scaleX),std::abs(object->m_scaleY));
+            if(radius>.01f)
+                shape=circle({static_cast<float>(object->m_positionX),
+                              static_cast<float>(object->m_positionY)},radius);
+        } else if(object->m_orientedBox && object->m_shouldUseOuterOb
+                   && !object->m_isOrientedBoxDirty) {
+            auto const& c=object->m_orientedBox->m_corners;
+            shape=oriented({{{c[0].x,c[0].y},{c[1].x,c[1].y},
+                            {c[2].x,c[2].y},{c[3].x,c[3].y}}});
         }
+        if(!valid(shape))return std::nullopt;
+        (special?result.specials:result.hazards).push_back(shape);
+        if(result.hazards.size()>256 || result.specials.size()>256)
+            return std::nullopt;
     }
     return result;
 }
 
-void rememberDelivered(PlayLayer* layer, bool player1, bool down, int mode,
-                       int step, Config const& cfg) {
-    if (!cfg.autoLearn || cfg.recordReference || cfg.clearLearned) return;
-    if (!layer || layer->m_playerDied) return;
-    auto* player = playerFor(layer, player1);
-    if (!player || player->m_isDead) return;
-    auto i = player1 ? 0 : 1;
-    auto& q = g_session.unverified[i];
-    if (q.size() >= kMaxLearningPerPlayer) q.pop_front();
-    q.push_back({g_session.level, step, player->m_position.x,
-                 player1, down, mode});
-}
-
-void learnFromSurvival(PlayLayer* layer, Config const& cfg, int step) {
-    if (!cfg.autoLearn || cfg.recordReference || cfg.clearLearned) return;
-    for (int i = 0; i != 2; ++i) {
-        bool p1 = i == 0;
-        auto* player = playerFor(layer, p1);
-        auto& queue = g_session.unverified[i];
-        if (!player || player->m_isDead || layer->m_playerDied) {
-            queue.clear();
-            continue;
-        }
-        while (!queue.empty()) {
-            auto const& sample = queue.front();
-            if (step - sample.step < kSurvivalSteps) break;
-            if (sample.level == g_session.level) {
-                addReference({sample.level, sample.player1, sample.down,
-                              sample.mode, sample.x}, false);
-            }
-            queue.pop_front();
-        }
-    }
-}
-
-void updateVelocity(PlayLayer* layer, int step) {
-    for (int i = 0; i != 2; ++i) {
-        auto* player = playerFor(layer, i == 0);
-        if (!player) continue;
-        float x = player->m_position.x;
-        if (!std::isfinite(x)) continue;
-        if (g_session.hasX[i]) {
-            int steps = std::max(1, step - g_session.lastStep);
-            float dx = (x - g_session.lastX[i]) / static_cast<float>(steps);
-            // Ignore teleports, checkpoints, or a level reset.
-            if (std::abs(dx) > .03f && std::abs(dx) < 70.f) {
-                g_session.speed[i] = dx;
-            }
-        }
-        g_session.lastX[i] = x;
-        g_session.hasX[i] = true;
-    }
-}
-
-// Collect currently active, static collision boxes. The predictor uses GD's
-// object type metadata instead of brittle lists of specific object IDs.
-// It intentionally does not simulate portals, orbs, triggers, move actions,
-// rotated polygon edges, or platformer movement. Unknown timing passes through.
-struct WaveScene {
-    std::vector<noclip::wave::Collider> hazards;
-    std::vector<noclip::wave::Collider> special;
-};
-
-std::optional<WaveScene> waveObstacles(
-    PlayLayer* layer, noclip::wave::State const& state, int horizon
-) {
-    if (!layer || !layer->m_objects || state.dxPerFrame <= .1f)
-        return std::nullopt; // Reversed X movement not modelled yet.
-    auto* children = layer->m_objects;
-
-    constexpr std::size_t kMaxCandidates = 1024;
-    WaveScene scene;
-    const float reach = state.dxPerFrame * horizon + 20.f;
-    const float start = state.x - 25.f;
-    const float end = state.x + reach;
-    const float vertical = std::abs(state.dxPerFrame) * horizon + 30.f;
-    for (auto* object : geode::cocos::CCArrayExt<GameObject>(children)) {
-        if (!object || object->m_isNoTouch || object->m_isDisabled) continue;
-        auto type = object->m_objectType;
-        bool collision = type == GameObjectType::Hazard
-            || type == GameObjectType::Solid
-            || type == GameObjectType::Breakable
-            || type == GameObjectType::Slope
-            || type == GameObjectType::AnimatedHazard;
-        // If a portal/pad/ring can change physics during our lookahead,
-        // our constant-slope prediction is NOT valid. Don't delay anything.
-        bool special = type == GameObjectType::InverseGravityPortal
-            || type == GameObjectType::NormalGravityPortal
-            || type == GameObjectType::WavePortal
-            || type == GameObjectType::CubePortal
-            || type == GameObjectType::ShipPortal
-            || type == GameObjectType::BallPortal
-            || type == GameObjectType::UfoPortal
-            || type == GameObjectType::RobotPortal
-            || type == GameObjectType::SpiderPortal
-            || type == GameObjectType::SwingPortal
-            || type == GameObjectType::TeleportPortal
-            || type == GameObjectType::MiniSizePortal
-            || type == GameObjectType::RegularSizePortal
-            || type == GameObjectType::GravityTogglePortal
-            || type == GameObjectType::YellowJumpPad
-            || type == GameObjectType::PinkJumpPad
-            || type == GameObjectType::GravityPad
-            || type == GameObjectType::RedJumpPad
-            || type == GameObjectType::YellowJumpRing
-            || type == GameObjectType::PinkJumpRing
-            || type == GameObjectType::RedJumpRing
-            || type == GameObjectType::GravityRing
-            || type == GameObjectType::GreenRing
-            || type == GameObjectType::DashRing
-            || type == GameObjectType::GravityDashRing
-            || type == GameObjectType::SpiderOrb
-            || type == GameObjectType::SpiderPad
-            || type == GameObjectType::TeleportOrb;
-        if (!collision && !special) continue;
-        auto rect = object->getObjectRect();
-        noclip::wave::Rect box{
-            rect.getMinX(), rect.getMinY(), rect.getMaxX(), rect.getMaxY()
-        };
-        if (!noclip::wave::valid(box)) continue;
-        if (box.right < start || box.left > end
-            || box.top < state.y - vertical || box.bottom > state.y + vertical)
-            continue;
-        noclip::wave::Collider collider = noclip::wave::makeBox(box);
-        if (type == GameObjectType::Slope) {
-            // Sloped surfaces have triangular collision geometry.
-            collider = noclip::wave::makeTriangle(box, object->m_slopeDirection);
-        } else if (object->m_objectRadius > 0.f) {
-            float radius = object->m_objectRadius * std::max(
-                std::abs(object->m_scaleX), std::abs(object->m_scaleY));
-            if (radius > 0.f)
-                collider = noclip::wave::makeCircle(
-                    {static_cast<float>(object->m_positionX),
-                     static_cast<float>(object->m_positionY)}, radius);
-        } else if (object->m_orientedBox && object->m_shouldUseOuterOb) {
-            if (object->m_isOrientedBoxDirty) object->updateOrientedBox();
-            auto& corners = object->m_orientedBox->m_corners;
-            collider = noclip::wave::makeQuad({{
-                {corners[0].x, corners[0].y},
-                {corners[1].x, corners[1].y},
-                {corners[2].x, corners[2].y},
-                {corners[3].x, corners[3].y}
-            }});
-        }
-        // Ignore an object's unsupported or degenerate collision geometry.
-        if (!noclip::wave::valid(collider)) return std::nullopt;
-        if (special) scene.special.push_back(collider);
-        else scene.hazards.push_back(collider);
-        if (scene.hazards.size() + scene.special.size() > kMaxCandidates)
-            return std::nullopt;
-    }
-    return scene;
-}
-
-std::optional<noclip::wave::Decision> wavePredictedDelay(
-    PlayLayer* layer, PlayerObject* player, bool currentHeld,
-    bool down, float dxPerStep, Config const& cfg
-) {
-    if (!cfg.predictWave || !player->m_isDart || layer->m_isPlatformer
-        || !std::isfinite(dxPerStep) || dxPerStep <= .1f)
-        return std::nullopt;
-
-    noclip::wave::State state;
-    // Do not guess an arbitrary 2px/3.5px wave hitbox. This is the
-    // collision shape GD uses for the small wave, including mini scale.
-    auto const rect = player->getObjectRect(.3f, .3f);
-    if (rect.size.width <= 0.f || rect.size.height <= 0.f)
-        return std::nullopt;
-    state.x = rect.getMidX();
-    state.y = rect.getMidY();
-    state.dxPerFrame = dxPerStep;
-    state.held = currentHeld;
-    state.gravityReversed = player->m_isUpsideDown;
-    state.halfWidth = rect.size.width * .5f;
-    state.halfHeight = rect.size.height * .5f;
-    // Look ahead far enough to actually discover a turning point even
-    // when the physical click is ~0.2 seconds (48 ticks) early.
-    int horizon = std::clamp(
-        std::max(cfg.waveHorizon, cfg.waveEarlyBufferSteps + 24),
-        12, 150
-    );
-    auto scene = waveObstacles(layer, state, horizon);
-    if (!scene) {
-        if (cfg.logWave)
-            log::info("Noclip WAVE: obstacle scan unavailable");
-        return std::nullopt;
-    }
-    if (cfg.logWave)
-        log::info(
-            "Noclip WAVE: scan hazards={} specials={} hitbox=({:.2f},{:.2f}) "
-            "player=({:.2f},{:.2f}) speed={:.3f}",
-            scene->hazards.size(), scene->special.size(),
-            rect.size.width, rect.size.height, state.x, state.y, dxPerStep
-        );
-
-    return noclip::wave::chooseDelay(
-        state, down, cfg.waveEarlyBufferSteps, horizon,
-        scene->hazards, scene->special
-    );
-}
-
-bool inPlay(PlayLayer* layer, Config const& cfg) {
-    return layer && layer->m_level && !layer->m_isPaused
-        && !layer->m_playerDied && !layer->m_useReplay
-        && (cfg.platformer || !layer->m_isPlatformer);
-}
-
 } // namespace
 
-class $modify(NoclipBaseGameLayer, GJBaseGameLayer) {
-    void handleButton(bool down, int button, bool isPlayer1) {
-        // In Geode/GD, the jump button is used for both presses and releases
-        // across cube, wave, ship, UFO, ball, robot, spider, and swing.
-        auto* layer = PlayLayer::get();
-        auto cfg = config();
+class $modify(NoclipInputLayer, GJBaseGameLayer) {
+    struct Fields {
+        noclip::InputQueue buffer;
+        std::uint64_t tick = 0;
+        std::uint64_t resetEpoch = 0;
+        float observedDx = 0.f;
+        bool haveVelocity = false;
+        bool injecting = false;
+    };
 
-        // Log BEFORE ANY pass-through checks. Earlier builds never logged
-        // jump events when the active game layer wasn't a PlayLayer (editor
-        // test), or when another early gate blocked the assist.
-        if (cfg.logWave && !g_dispatchingBuffered
-            && button == static_cast<int>(PlayerButton::Jump)) {
-            auto* editor = LevelEditorLayer::get();
-            auto* base = static_cast<GJBaseGameLayer*>(this);
-            bool eligible = inPlay(layer, cfg);
-            bool isWave = layer && layer->m_player1 && layer->m_player1->m_isDart;
-            log::info(
-                "Noclip INPUT {}: enabled={} referenceWindow={} waveWindow={}ms/{}ticks play={} editor={} "
-                "layerMatch={} eligible={} wave={} step={}",
-                down ? "PRESS" : "RELEASE", cfg.enabled, cfg.window,
-                cfg.waveEarlyBufferMs, cfg.waveEarlyBufferSteps,
-                layer != nullptr, editor != nullptr, layer == base,
-                eligible, isWave,
-                layer ? layer->m_currentStep : -1
-            );
-        }
-        if (g_dispatchingBuffered || !cfg.enabled
-            || (cfg.window == 0 && cfg.waveEarlyBufferSteps == 0)
-            || !inPlay(layer, cfg) || layer != static_cast<GJBaseGameLayer*>(this)
-            || button != static_cast<int>(PlayerButton::Jump)) {
-            GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            if (layer && layer == static_cast<GJBaseGameLayer*>(this)
-                && button == static_cast<int>(PlayerButton::Jump))
-                g_session.deliveredHeld[isPlayer1 ? 0 : 1] = down;
-            return;
-        }
-
-        loadAnchors();
-        clearReferencesIfRequested(cfg);
-        g_session.bind(layer);
-        auto* player = playerFor(layer, isPlayer1);
-        if (!player || player->m_isDead) {
-            GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            return;
-        }
-
-        int step = layer->m_currentStep;
-        int mode = playerMode(player);
-        float x = player->m_position.x;
-        int i = isPlayer1 ? 0 : 1;
-
-        // Training mode captures explicit reference timing without modifying
-        // the current attempt's inputs.
-        if (cfg.recordReference) {
-            GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            g_session.deliveredHeld[i] = down;
-            if (!cfg.clearLearned) {
-                addReference({g_session.level, isPlayer1, down, mode, x}, true);
-            }
-            return;
-        }
-
-        // Only wave uses the collision-aware micro predictor. Other modes
-        // continue to use optional learned reference positions.
-        auto& pending = g_session.delayed[i];
-        bool preserveQueueOrder = !pending.empty();
-        bool waveMode = cfg.predictWave && mode == 1;
-        auto prediction = (waveMode && !preserveQueueOrder)
-            ? wavePredictedDelay(layer, player, g_session.deliveredHeld[i],
-                                 down, g_session.speed[i], cfg)
-            : std::nullopt;
-        int predictedFrames = prediction ? prediction->delayFrames : 0;
-        bool predictiveDelay = predictedFrames > 0;
-
-        if (waveMode && cfg.logWave) {
-            if (preserveQueueOrder) {
-                log::info("Noclip wave {}: queued behind prior edge at step {}",
-                          down ? "PRESS" : "RELEASE", step);
-            } else if (prediction) {
-                log::info(
-                    "Noclip wave {}: {}, delay={} steps, hit={}, checked={}, "
-                    "candidates={}, x={:.1f}, vx={:.2f}",
-                    down ? "PRESS" : "RELEASE",
-                    noclip::wave::verdictName(prediction->verdict),
-                    prediction->delayFrames, prediction->firstCollisionFrame,
-                    prediction->comparedFrames, prediction->safeCandidates,
-                    x, g_session.speed[i]
-                );
-            } else {
-                log::info(
-                    "Noclip wave {}: unavailable (unsupported state/speed), "
-                    "x={:.1f}, vx={:.2f}",
-                    down ? "PRESS" : "RELEASE", x, g_session.speed[i]
-                );
-            }
-        }
-
-        // When wave correction is on, never blindly delay an input.
-        auto found = waveMode ? std::optional<float>{} : nearestReference(
-            g_session.level, isPlayer1, down, mode,
-            x, g_session.speed[i], cfg.window
-        );
-        bool blind = !waveMode && cfg.blindDelay && !found.has_value();
-        if (!found && !blind && !preserveQueueOrder && !predictiveDelay) {
-            GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            g_session.deliveredHeld[i] = down;
-            rememberDelivered(layer, isPlayer1, down, mode, step, cfg);
-            g_session.lastSendStep[i] = step;
-            return;
-        }
-
-        if (pending.size() >= kMaxQueuedPerPlayer) {
-            pending.clear();
-            GJBaseGameLayer::handleButton(down, button, isPlayer1);
-            g_session.deliveredHeld[i] = down;
-            return;
-        }
-
-        noclip::Deferred event;
-        event.down = down;
-        event.button = button;
-        event.player1 = isPlayer1;
-        event.receivedStep = step;
-        event.expiresStep = step + (predictiveDelay ? predictedFrames
-            : (found || blind ? cfg.window : 0));
-        event.hasTarget = found.has_value();
-        event.targetX = found.value_or(0.f);
-        event.direction = noclip::normalizeDirection(g_session.speed[i]);
-
-        if (preserveQueueOrder) {
-            // Keep the physical press/release gap intact after buffering:
-            // a 1-step click followed by release remains a 1-step tap.
-            auto const& prev = pending.back();
-            int physicalGap = std::max(1, step - prev.receivedStep);
-            event.expiresStep = std::max(step, prev.expiresStep + physicalGap);
-            event.hasTarget = false;
-        }
-        pending.push_back(event);
+    void resetIfNeeded() {
+        if(m_fields->resetEpoch==g_resetEpoch)return;
+        m_fields->buffer.clear();
+        m_fields->tick=0;
+        m_fields->observedDx=0.f;
+        m_fields->haveVelocity=false;
+        m_fields->resetEpoch=g_resetEpoch;
     }
 
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        auto* layer = PlayLayer::get();
-        auto cfg = config();
-        if (layer && layer == static_cast<GJBaseGameLayer*>(this)) {
-            g_session.bind(layer);
-            loadAnchors();
-            clearReferencesIfRequested(cfg);
+    void sendBuffered(noclip::Edge const& edge, Settings const& cfg) {
+        // Unlike v0.4, use the *normal game-layer input path* for playback;
+        // PlayerObject direct calls broke input routing in dual and with mods.
+        m_fields->injecting=true;
+        GJBaseGameLayer::handleButton(edge.pressed,edge.button,edge.player1);
+        m_fields->injecting=false;
+        if (cfg.debug) {
+            bool received = m_player1 && m_player1->m_holdingButtons[
+                static_cast<int>(PlayerButton::Jump)] == edge.pressed;
+            log::info("Noclip DISPATCH {} raw={} applied={} delay={} actualHeld={}",
+                edge.pressed ? "PRESS" : "RELEASE", edge.received,
+                m_fields->tick, m_fields->tick-edge.received, received);
+        }
+    }
 
-            int step = layer->m_currentStep;
-            if (step != g_session.lastStep) {
-                updateVelocity(layer, step);
-                if (!cfg.enabled
-                    || (cfg.window == 0 && cfg.waveEarlyBufferSteps == 0)
-                    || cfg.recordReference) {
-                    for (auto& q : g_session.delayed) q.clear();
-                }
-                if (inPlay(layer, cfg) && cfg.enabled
-                    && (cfg.window > 0 || cfg.waveEarlyBufferSteps > 0)
-                    && !cfg.recordReference) {
-                    for (int i = 0; i != 2; ++i) {
-                        auto& queue = g_session.delayed[i];
-                        auto* player = playerFor(layer, i == 0);
-                        if (!player || player->m_isDead) {
-                            queue.clear();
-                            continue;
-                        }
-                        if (queue.empty() || g_session.lastSendStep[i] == step)
-                            continue;
+    void flush(Settings const& cfg) {
+        for(int i=0;i<2;++i) {
+            while(auto edge=m_fields->buffer.popFirst(i))
+                sendBuffered(*edge,cfg);
+        }
+    }
 
-                        auto const& event = queue.front();
-                        if (!noclip::shouldDispatch(
-                                event, player->m_position.x,
-                                g_session.speed[i], step)) continue;
+    void handleButton(bool down,int button,bool player1) {
+        if(m_fields->injecting) {
+            GJBaseGameLayer::handleButton(down,button,player1);
+            return;
+        }
+        resetIfNeeded();
+        Settings cfg=readSettings();
+        bool eligible=mayBuffer(this,cfg) && player1
+            && button==static_cast<int>(PlayerButton::Jump);
+        if(!eligible) {
+            // This includes all dual-mode events, CBF, portals, and disabled
+            // states. Never hold an event when we cannot safely re-emit it.
+            if(m_fields->buffer.hasPending(0) || m_fields->buffer.hasPending(1))
+                flush(cfg);
+            if(cfg.enabled && cbfInstalled() && !g_warnedCbf) {
+                log::warn("Noclip: CBF detected; buffering safely disabled. Turn CBF off to test.");
+                g_warnedCbf=true;
+            }
+            GJBaseGameLayer::handleButton(down,button,player1);
+            if(button==static_cast<int>(PlayerButton::Jump))
+                m_fields->buffer.players[player1?0:1].deliveredHeld=down;
+            return;
+        }
 
-                        // Remove first, then call original via hook with guard.
-                        // This preserves press/release ordering even if the
-                        // user lets go before their buffered press is fired.
-                        auto edge = event;
-                        queue.pop_front();
-                        // CBF filters GJBaseGameLayer::handleButton outside
-                        // its real-input window. Buffered jumps are deliberately
-                        // sent later; that filter may otherwise swallow them.
-                        // The wave only needs PlayerObject jump state, so
-                        // prefer a direct press/release for the wave. This is
-                        // configurable in case other mods depend on BGL hooks.
-                        bool directWave = cfg.directWaveDispatch
-                            && playerMode(player) == 1
-                            && edge.button == static_cast<int>(PlayerButton::Jump);
-                        if (directWave) {
-                            if (edge.down) player->pushButton(PlayerButton::Jump);
-                            else player->releaseButton(PlayerButton::Jump);
-                            g_session.deliveredHeld[i] = edge.down;
-                        } else {
-                            g_dispatchingBuffered = true;
-                            this->handleButton(edge.down, edge.button, edge.player1);
-                            g_dispatchingBuffered = false;
-                            g_session.deliveredHeld[i] = edge.down;
+        int delay=0;
+        if(!m_fields->buffer.hasPending(0)) {
+            if(cfg.fixedDelayTest) {
+                delay=cfg.fixedTicks;
+            } else if(m_fields->haveVelocity) {
+                auto player=m_player1;
+                auto rect=player->getObjectRect(.3f,.3f);
+                if(rect.size.width>0.f && rect.size.height>0.f) {
+                    noclip::wave::State state;
+                    state.x=rect.getMidX();
+                    state.y=rect.getMidY();
+                    state.dx=m_fields->observedDx;
+                    state.halfW=rect.size.width*.5f;
+                    state.halfH=rect.size.height*.5f;
+                    state.verticalSlope=player->m_vehicleSize<1.f?2.f:1.f;
+                    state.held=player->m_holdingButtons[
+                        static_cast<int>(PlayerButton::Jump)];
+                    state.upsideDown=player->m_isUpsideDown;
+                    int horizon=std::max(cfg.lookahead,cfg.maxTicks+8);
+                    if(auto scene=sceneFor(this,state,horizon)) {
+                        auto result=noclip::wave::choose(
+                            state,down,cfg.maxTicks,horizon,
+                            scene->hazards,scene->specials);
+                        delay=result.delay;
+                        if(cfg.debug) {
+                            log::info("Noclip PREVIEW {} tick={} candidates=0..{} "
+                                      "survivalNow={} survivalBest={} chosenDelay={} "
+                                      "supported={} hazards={} specials={}",
+                                down?"PRESS":"RELEASE",m_fields->tick,cfg.maxTicks,
+                                result.immediateSurvival,result.bestSurvival,delay,
+                                result.supported,scene->hazards.size(),scene->specials.size());
                         }
-                        g_session.lastSendStep[i] = step;
-                        if (cfg.logWave && playerMode(player) == 1) {
-                            bool actuallyHeld = player->m_holdingButtons[
-                                static_cast<int>(PlayerButton::Jump)];
-                            log::info("Noclip wave {}: DISPATCHED at step {} "
-                                      "(received {}, delay {}, route={}, "
-                                      "heldNow={}, expectedHeld={})",
-                                      edge.down ? "PRESS" : "RELEASE",
-                                      step, edge.receivedStep, step - edge.receivedStep,
-                                      directWave ? "player-direct" : "game-layer",
-                                      actuallyHeld, edge.down);
-                        }
-                        rememberDelivered(layer, edge.player1, edge.down,
-                                          playerMode(player), step, cfg);
+                    } else if(cfg.debug) {
+                        log::info("Noclip PREVIEW unsupported: scene scan failed");
                     }
                 }
-                learnFromSurvival(layer, cfg, step);
-                if (g_dirty && step > 0 && step % 240 == 0) saveAnchors();
-                g_session.lastStep = step;
             }
-            if (layer->m_playerDied) g_session.resetTransient();
         }
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if(cfg.debug)
+            log::info("Noclip INPUT {} tick={} delay={} pending={}",
+                down?"PRESS":"RELEASE",m_fields->tick,delay,
+                m_fields->buffer.hasPending(0));
+        bool buffered=m_fields->buffer.intercept(
+            down,true,button,m_fields->tick,delay);
+        if(!buffered) {
+            if(m_fields->buffer.hasPending(0))flush(cfg);
+            GJBaseGameLayer::handleButton(down,button,player1);
+        }
+    }
+
+    void processCommands(float dt,bool isHalfTick,bool isLastTick) {
+        resetIfNeeded();
+        Settings cfg=readSettings();
+        if (!isHalfTick) ++m_fields->tick;
+
+        // Flush/deliver BEFORE physics advances, not after the player
+        // collides. The old builds delivered too late and could lose inputs.
+        if(m_fields->buffer.hasPending(0) || m_fields->buffer.hasPending(1)) {
+            if(!mayBuffer(this,cfg))flush(cfg);
+            else if(!isHalfTick) {
+                for(int i=0;i<2;++i)
+                    while(auto edge=m_fields->buffer.popDue(i,m_fields->tick))
+                        sendBuffered(*edge,cfg);
+            }
+        }
+
+        float before=(m_player1 ? m_player1->getPositionX() : 0.f);
+        GJBaseGameLayer::processCommands(dt,isHalfTick,isLastTick);
+        if(!isHalfTick && m_player1) {
+            float dx=m_player1->getPositionX()-before;
+            if(std::isfinite(dx) && dx>.05f && dx<30.f) {
+                m_fields->observedDx=dx;
+                m_fields->haveVelocity=true;
+            } else if(dx < -1.f || dx>30.f) {
+                // A teleport/reset invalidates previous velocity and queues.
+                m_fields->haveVelocity=false;
+                m_fields->buffer.clear();
+            }
+        }
+        if(m_playerDied) {
+            m_fields->buffer.clear();
+            m_fields->haveVelocity=false;
+        }
     }
 };
 
-class $modify(NoclipPlayLayer, PlayLayer) {
+class $modify(NoclipResetHook, PlayLayer) {
     void resetLevel() {
-        if (g_dirty) saveAnchors();
-        g_session.resetTransient();
+        ++g_resetEpoch;
         PlayLayer::resetLevel();
     }
     void onExit() {
-        if (g_dirty) saveAnchors();
-        g_session.resetTransient();
-        g_session.layer = nullptr;
-        g_session.level.clear();
+        ++g_resetEpoch;
         PlayLayer::onExit();
     }
 };
 
+class $modify(NoclipKeyboardHook, CCKeyboardDispatcher) {
+    void dispatchKeyboardMSG(
+        enumKeyCodes key,bool isDown,bool isRepeat,double timestamp
+    ) {
+        if(key==enumKeyCodes::KEY_F6 && isDown && !isRepeat
+           && Mod::get()->getSettingValue<bool>("f6-cycle")) {
+            g_stageOverride=(g_stageOverride+1)%5;
+            if(kStages[g_stageOverride]==0) {
+                log::info("Noclip F6: OFF (raw input)");
+            } else {
+                log::info("Noclip F6: stage {}, wave correction max {} ticks",
+                          g_stageOverride+1,kStages[g_stageOverride]);
+            }
+        }
+        CCKeyboardDispatcher::dispatchKeyboardMSG(
+            key,isDown,isRepeat,timestamp);
+    }
+};
+
 $on_mod(Loaded) {
-    log::info("Noclip v0.5.0 loaded: wave early buffer 200ms default (48 steps at 240TPS)");
+    log::info("Noclip v0.6.0 probe: independent press/release queue, "
+              "safe dual/CBF bypass, wave preview. Mod OFF until enabled.");
 }

@@ -1,32 +1,62 @@
-# Noclip v0.5.0 — experimental 200ms early-wave buffer
+# Noclip — Input Buffer Lab v0.6.0
 
-**This revision fixes a timing-window mismatch, not proven frame-perfect
-collision prediction.** At GD's nominal 240 physics steps/sec, a press 0.2
-seconds early arrives 48 steps before the desired turn. Older Noclip builds
-allowed only 5 steps (~21ms) and examined only 20 steps ahead.
+This is a **from-scratch, experimental** Geode mod for GD 2.2081 on Windows.
+It contains a real queued input path and an *unverified* wave collision
+predictor. There is **no proof it saves attempts in the real game yet**.
+A successful Github Actions build and portable simulation tests are not proof
+of in-game correctness.
 
-## Settings
-- **Wave early input buffer (milliseconds)**: 200 ms by default, adjustable
-  0–300 ms. This is separate from the legacy 5-physics-frame setting for
-  cube/learned references.
-- Hidden wave trajectory correction: enabled
-- Wave lookahead: 76 steps default, automatically increased when needed
-- Log wave decisions: optional diagnostics
+## What is implemented
 
-## Expected wave behavior
-On a wave press/release the mod predicts local collision paths for now and
-delays up to the configured wave buffer. It buffers **only if** the immediate
-trajectory predicts a collision and delaying the input predicts survival
-through the next obstacle. A click far from a relevant hazard, or a section
-the approximation cannot predict, **passes through normally**. It does not
-blindly delay every early click.
+- Single-player wave **presses and releases**; the Geode BGL hook buffers an
+  event and replays it before a later `processCommands` physics step.
+- A **force-exact-delay diagnostic** mode: guarantees queue scheduling in
+  portable tests (e.g. presses/release scheduled exactly two counted ticks
+  later). It is *not intended to make the level easier*; it exists to verify
+  actual interception, delivery and tick timing inside GD first.
+- **Predictive mode** (experimental): samples x speed from recent game steps;
+  traces wave position and static collision geometry for each candidate
+  delay 0–8 ticks, and picks one only if it predicts at least two extra ticks
+  of survival. This is NOT actual GD simulation; spikes, moving geometry,
+  dash orbs, portals and triggers can be mispredicted.
+- Dual mode is always **raw passthrough**, including levels configured
+  for two-player mode. Existing queued edges are flushed in order when
+  entering unsupported play modes, rather than intentionally dropped.
+- CBF (`syzzi.click_between_frames`) detected => raw passthrough for
+  safety, since delayed input injection through GJBaseGameLayer can be
+  swallowed by CBF's filter; disable CBF to test this mod.
+- F6 cycles wave corrections (2,4,8,8,OFF). Switch the mod on in settings.
+- Debug logging prints requested and applied input ticks and whether the
+  actual player button state matches a dispatched event.
 
-The model uses approximate current wave speed and static collision geometry.
-It does not include GD's full state/physics and cannot promise frame-perfect
-survival in the user's specific level.
+## Install / first test (do not test first on Grief)
 
-## Install and diagnose
-https://github.com/pleqpleq/Noclip-Geode/actions — use latest successful
-Windows Geode artifact. Targets GD 2.2081.
-If a predicted early input still registers normally, enable Log wave
-decisions and share Geode log lines starting with `Noclip`.
+1. Make sure **Click Between Frames is disabled**, close/reopen Geometry Dash.
+2. Download the latest *successful* `Noclip-Windows-Geode` artifact from
+   https://github.com/pleqpleq/Noclip-Geode/actions and replace the old
+   `supleq.noclip.geode`. Restart GD.
+3. Geode > Noclip: **Enable input correction** = ON;
+   **Diagnostic: force exact delay** = ON; **Diagnostic delay amount** = 2;
+   **Log every buffered input and prediction** = ON.
+4. In an *easy single-player wave test level*, make one press and one release.
+   Read `geode/logs` for `Noclip INPUT`, `Noclip DISPATCH`, their tick values
+   and `actualHeld=true`. Don't begin with Grief or any dual level.
+5. Only if the diagnostic mode really delays press and release in-game,
+   switch diagnostic mode OFF and test predictive mode on simple static spikes.
+   Send the logs from the first miss; further prediction development should
+   depend on these actual measurements.
+
+## Known limitations
+
+- **Not** guaranteed to save frame-perfect clicks; model doesn't predict
+  the entire future input sequence or use GD's full engine collision model.
+- **Not** capable of reliably correcting clicks 0.2–0.5 seconds early. The
+  video you showed demonstrates approximately 1–8 *physics ticks*, not
+  0.2–0.5 seconds. At 240 TPS, 8 ticks = 33.3 ms.
+- Only single-player wave is assisted. Cube/ship/etc and dual are raw input.
+- If CBF is installed/enabled, this mod deliberately does nothing.
+- Does not spoof legitimate leaderboard scores. Using assisted inputs may
+  violate competitive rules: disclose any mod-assisted completions.
+
+This code deliberately avoids the old `Noclip` v0.1–0.5's global queues,
+conflicting direct `PlayerObject` injection, and blind delays.

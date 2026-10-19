@@ -1,18 +1,13 @@
 cmake_minimum_required(VERSION 3.29)
-project(Noclip VERSION 0.5.0 LANGUAGES CXX)
+project(Noclip VERSION 0.6.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 if(NOT DEFINED ENV{GEODE_SDK})
   message(FATAL_ERROR "GEODE_SDK missing")
 endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode-sdk)
-# Work around missing transitive header imports in GD 2.2081's generated
-# unity source units without pretending the upstream state types are other types.
 if(TARGET GeodeBindings AND WIN32)
-    target_compile_options(GeodeBindings PRIVATE
-        -include Geode/Geode.hpp
-    )
+  target_compile_options(GeodeBindings PRIVATE -include Geode/Geode.hpp)
 endif()
-
 add_library(${PROJECT_NAME} SHARED src/main.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 setup_geode_mod(${PROJECT_NAME})
