@@ -1,0 +1,33 @@
+name: Native standalone Windows build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  portable-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B out -DNATIVE_TESTS=ON
+      - run: cmake --build out --parallel
+      - run: ctest --test-dir out --output-on-failure
+  windows-build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure x64
+        run: cmake -S . -B out -A x64
+      - name: Compile x64
+        run: cmake --build out --config Release --parallel
+      - name: Bundle launcher and native helper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+          Copy-Item out/Release/SupleqInputBuffer.exe bundle/
+          Copy-Item out/Release/SupleqBufferHook.dll bundle/
+          Copy-Item README.md bundle/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SupleqNative-Windows-x64
+          path: bundle/
+          if-no-files-found: error
